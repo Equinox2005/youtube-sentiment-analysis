@@ -171,19 +171,3 @@ python sentiment_analysis.py
 ```
 
 ---
-
-## **📜 License**
-This project is **open-source** and licensed under the **MIT License**.  
-Feel free to use, modify, and distribute it! 🚀
-
----
-
-## **🔗 Connect With Me**
-- **GitHub**: [Your GitHub Profile](https://github.com/your-username)
-- **LinkedIn**: [Your LinkedIn Profile](https://www.linkedin.com/in/your-profile)
-- **Portfolio**: [Your Website](https://your-portfolio.com)
-
----
-
-🎉 **Now your project is fully documented for GitHub!** 🚀  
-Let me know if you want any refinements. 😊
