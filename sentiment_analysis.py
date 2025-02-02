@@ -3,7 +3,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
 import os
 
-###  Load Sentiment140 Dataset
+### Load Sentiment140 Dataset
 def load_sentiment140():
     dataset_path = "sentiment140.csv"
     if not os.path.exists(dataset_path):
