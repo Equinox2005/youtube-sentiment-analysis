@@ -15,7 +15,6 @@ This program determines whether comments **agree or disagree** with the sentimen
 - [💡 Using a Different Dataset](#-using-a-different-dataset)
 - [🚀 Example Output](#-example-output)
 - [🔧 Troubleshooting](#-troubleshooting)
-- [📜 License](#-license)
 
 ---
 
