@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Sentiment Insights</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>▶ YouTube Sentiment Insights</h1>
+    <p class="tagline">Understand how an audience really feels — comment sentiment, trends, keywords &amp; more.</p>
+  </header>
+
+  <main>
+    <section class="card input-card">
+      <div class="tabs">
+        <button class="tab active" data-mode="single">Analyze a video</button>
+        <button class="tab" data-mode="compare">Compare two videos</button>
+      </div>
+
+      <form id="analyze-form">
+        <div class="url-row">
+          <input type="text" id="url-a" placeholder="Paste a YouTube URL or video ID… (or type: demo)" required />
+          <input type="text" id="url-b" placeholder="Second video URL…" class="hidden" />
+        </div>
+        <div class="options-row">
+          <label>Comments
+            <select id="max-comments">
+              <option value="100">100</option>
+              <option value="300">300</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1000</option>
+              <option value="2000">2000</option>
+            </select>
+          </label>
+          <label>Sort by
+            <select id="sort-by">
+              <option value="relevance" selected>Top comments</option>
+              <option value="time">Latest comments</option>
+            </select>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="include-transcript" checked /> Transcript analysis
+          </label>
+          <button type="submit" id="analyze-btn">Analyze</button>
+        </div>
+      </form>
+      <p id="key-banner" class="hidden banner">
+        ⚠ No YouTube API key configured — type <code>demo</code> as the URL to explore sample data,
+        or set <code>YOUTUBE_API_KEY</code> and restart the server.
+      </p>
+      <p id="error-box" class="hidden banner error"></p>
+      <div id="loading" class="hidden loading">
+        <div class="spinner"></div>
+        <p>Fetching comments &amp; crunching sentiment…</p>
+      </div>
+    </section>
+
+    <!-- Single video results -->
+    <section id="results" class="hidden">
+      <div class="card video-card" id="video-card"></div>
+
+      <div class="grid-3">
+        <div class="card stat-card">
+          <h3>Verdict</h3>
+          <p id="verdict" class="verdict"></p>
+          <div class="health-wrap">
+            <div class="health-bar"><div id="health-fill"></div></div>
+            <span id="health-label"></span>
+          </div>
+        </div>
+        <div class="card stat-card">
+          <h3>Sentiment breakdown</h3>
+          <div class="chart-box"><canvas id="pie-chart"></canvas></div>
+        </div>
+        <div class="card stat-card">
+          <h3>Key numbers</h3>
+          <ul class="numbers" id="key-numbers"></ul>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>Sentiment over time</h3>
+          <div class="chart-box tall"><canvas id="timeline-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Top keywords in comments</h3>
+          <div id="keywords" class="keywords"></div>
+        </div>
+      </div>
+
+      <div class="card" id="agreement-card">
+        <h3>Do commenters agree with the video?</h3>
+        <p class="muted small">Based on the video transcript's overall tone vs. each comment's tone.</p>
+        <div id="agreement"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>💚 Most positive comments</h3>
+          <div id="top-positive" class="comment-list"></div>
+        </div>
+        <div class="card">
+          <h3>💔 Most negative comments</h3>
+          <div id="top-negative" class="comment-list"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>👍 Most liked comments</h3>
+        <div id="most-liked" class="comment-list"></div>
+      </div>
+
+      <div class="card export-card">
+        <h3>Export</h3>
+        <a id="export-csv" class="btn-secondary" download>Download CSV</a>
+        <a id="export-json" class="btn-secondary" download>Download JSON</a>
+      </div>
+    </section>
+
+    <!-- Comparison results -->
+    <section id="compare-results" class="hidden">
+      <div class="grid-2" id="compare-cards"></div>
+      <div class="card">
+        <h3>Head to head</h3>
+        <div class="chart-box tall"><canvas id="compare-chart"></canvas></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Sentiment powered by VADER (tuned for social-media language). Data from the YouTube Data API v3.</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
