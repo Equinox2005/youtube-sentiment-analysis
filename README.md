@@ -1,172 +1,143 @@
+# ▶ YouTube Sentiment Insights
+
+**A web app that shows you how an audience *really* feels about any YouTube video.**
+
+Paste a video URL and get an interactive dashboard: sentiment breakdown, community
+health score, sentiment trends over time, top keywords, the most loved/hated comments,
+whether commenters agree with the video itself, side-by-side video comparison, and
+CSV/JSON export.
+
+Runs entirely on your machine — no accounts, no tracking.
 
 ---
 
-## **📌 YouTube Sentiment Analysis**
-🚀 **A Python project that analyzes YouTube video sentiment based on comments and video transcripts.**  
-This program determines whether comments **agree or disagree** with the sentiment expressed in the video.
+## 🌟 What it does
+
+| Feature | Why it's useful |
+|---|---|
+| **Sentiment breakdown** (positive / negative / neutral) | Instant read on audience reception |
+| **Community health score** (0–100) & plain-English verdict | One number to compare videos at a glance |
+| **Like-weighted sentiment** | Weighs opinions by likes — what the community *endorses*, not just what it says |
+| **Sentiment over time** | See if reception improved or soured after upload (great for spotting controversies) |
+| **Top keywords** | What the conversation is actually about |
+| **Most positive / negative / liked comments** | Jump straight to the strongest reactions |
+| **Transcript agreement** | Does the audience agree with the video's own tone/message? |
+| **Compare two videos** | A/B thumbnails, competitors, before/after apology videos… |
+| **Export CSV / JSON** | Take the scored comments into Excel, pandas, wherever |
+| **Demo mode** | Try everything without an API key — just type `demo` |
+
+### Who benefits
+- **Creators** — read the room across thousands of comments in seconds; track reception over time.
+- **Marketers / brands** — vet influencers and measure campaign reception before partnering.
+- **Researchers / students** — export scored comment datasets with one click.
+- **Viewers** — check if a video is community-approved before spending 40 minutes on it.
 
 ---
 
-## **📖 Table of Contents**
-- [🌟 Features](#-features)
-- [🛠 Installation](#-installation)
-- [⚙️ How to Use](#-how-to-use)
-- [🔄 Modifications & Customization](#-modifications--customization)
-- [💡 Using a Different Dataset](#-using-a-different-dataset)
-- [🚀 Example Output](#-example-output)
-- [🔧 Troubleshooting](#-troubleshooting)
+## 🎯 Accuracy
+
+Earlier versions used a Naïve Bayes bag-of-words model trained on 2009-era tweets
+(Sentiment140), which required a manual 1.6M-row dataset download and misread modern
+comment language. This version uses **VADER**, a rule-based model built specifically
+for social-media text. It correctly handles:
+
+- **Negation** — "not good at all" → negative
+- **Intensity** — "AMAZING!!!" scores higher than "amazing"
+- **Emoji** — 🔥 ❤️ 💀 are scored
+- **Slang** — plus a custom YouTube lexicon (`goated`, `mid`, `clickbait`, `W`, `L`, …)
+- **Neutrality** — "Who's watching in 2026?" is neutral, not forced into pos/neg
+- Long transcripts are scored in chunks to avoid saturation
+- URLs and video timestamps (e.g. `10:24`) are stripped before scoring
+
+No dataset download, no training step — it just works.
 
 ---
 
-## **🌟 Features**
-✅ Fetches **YouTube video comments** using the **YouTube Data API v3**  
-✅ Retrieves **video transcripts** (if available) to determine the video’s sentiment  
-✅ Uses a **Naïve Bayes Classifier** trained on **Sentiment140 (Twitter-based dataset)**  
-✅ Determines whether **comments agree or disagree** with the video  
-✅ Supports fetching **top comments or latest comments**  
-✅ Handles **up to 5000 comments per video** with pagination  
-✅ Fully customizable to work with **other sentiment datasets**  
+## 🛠 Setup
 
----
+### 1. Install
 
-## **🛠 Installation**
-### **1️⃣ Clone the Repository**
 ```bash
-git clone https://github.com/your-username/youtube-sentiment-analysis.git
+git clone https://github.com/Equinox2005/youtube-sentiment-analysis.git
 cd youtube-sentiment-analysis
-```
-
-### **2️⃣ Install Required Dependencies**
-```bash
 pip install -r requirements.txt
 ```
 
-### **3️⃣ Install Sentiment140 Dataset (Required)**
-**This repository does not include the Sentiment140 dataset.**  
-You must **download it manually** or use another dataset (see [Using a Different Dataset](#-using-a-different-dataset)).  
+### 2. Get a YouTube API key (free)
 
-#### **📥 Download Sentiment140**
-1. Go to **[Sentiment140 Dataset](http://help.sentiment140.com/for-students)**
-2. Download `training.1600000.processed.noemoticon.csv`
-3. Rename it to **`sentiment140.csv`**
-4. Move it to your project directory:
-   ```
-   youtube-sentiment-analysis/
-   ├── youtube_comments.py
-   ├── sentiment_analysis.py
-   ├── sentiment140.csv  <-- ✅ Place it here!
-   ├── requirements.txt
-   ├── README.md
-   ```
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a project → enable **YouTube Data API v3** → create an **API key**
+3. Provide it via environment variable, or copy `.env.example` to `.env` and paste it in:
 
----
-
-## **⚙️ How to Use**
-### **1️⃣ Run `youtube_comments.py` to Fetch Comments & Analyze Video Sentiment**
 ```bash
-python youtube_comments.py
-```
-- **Enter a YouTube Video URL**  
-- **Choose how many comments to fetch**  
-- **Select "top" or "latest" comments**  
-- The script will:
-  - Fetch comments
-  - Get the video transcript (if available)
-  - Analyze the **video’s sentiment**
-  - Save everything to `youtube_comments.csv`
+# Windows (PowerShell)
+$env:YOUTUBE_API_KEY = "your-key-here"
 
-### **2️⃣ Run `sentiment_analysis.py` to Analyze Comments**
+# macOS / Linux
+export YOUTUBE_API_KEY="your-key-here"
+```
+
+> **No key yet?** Type `demo` as the URL in the app (or run `python cli.py demo`)
+> to explore the full experience with bundled sample data.
+
+### 3. Run the web app
+
 ```bash
-python sentiment_analysis.py
+uvicorn app.main:app
 ```
-- This script will:
-  - Read comments from `youtube_comments.csv`
-  - Predict **whether comments agree or disagree** with the video
-  - Display the **final analysis results**
+
+Open **http://127.0.0.1:8000** — paste a URL, hit **Analyze**.
 
 ---
 
-## **🔄 Modifications & Customization**
-### **Change the Number of Comments Fetched**
-Modify this line in `youtube_comments.py`:
-```python
-max_comments = 500  # Change this to any number (max 5000 recommended)
-```
+## 💻 Command line
 
-### **Use "Top" or "Latest" Comments by Default**
-Change this line in `youtube_comments.py`:
-```python
-sort_by = "relevance"  # Change to "time" for latest comments
-```
+The same engine is available as a CLI:
 
-### **Modify Sentiment Model Parameters**
-Edit `train_sentiment_model()` in `sentiment_analysis.py`:
-```python
-vectorizer = CountVectorizer(max_features=5000)  # Increase feature size for better accuracy
-```
-
----
-
-## **💡 Using a Different Dataset**
-This project **uses Sentiment140**, but you can replace it with another sentiment dataset.
-
-### **1️⃣ Download a New Dataset**
-Find another **labeled** dataset where text is classified as **positive/negative** (e.g., IMDB, Amazon reviews, Reddit comments).
-
-### **2️⃣ Modify `load_sentiment140()` in `sentiment_analysis.py`**
-Replace:
-```python
-df = pd.read_csv("sentiment140.csv", encoding="latin1", usecols=[0, 5], names=["sentiment", "text"])
-df["sentiment"] = df["sentiment"].replace({0: "neg", 4: "pos"})
-```
-With:
-```python
-df = pd.read_csv("your_new_dataset.csv")
-df["sentiment"] = df["sentiment_column"].map({1: "pos", 0: "neg"})  # Modify mapping based on your dataset
-```
-
----
-
-## **🚀 Example Output**
-```
-🔗 Paste YouTube video URL: https://www.youtube.com/watch?v=dQw4w9WgXcQ
-🔢 Enter the number of comments to fetch (max 5000 recommended): 500
-📌 Fetch top comments or latest comments? (Enter 'top' or 'latest'): top
-✅ YouTube comments and video sentiment saved to `youtube_comments.csv`
-🎥 Video Sentiment: negative
-💬 Total Comments Fetched: 500
-
-📊 **Sentiment Analysis Results:**
-Total Comments Analyzed: 500
-👍 Agreeing Comments: 350 (70.00%)
-👎 Disagreeing Comments: 150 (30.00%)
-```
-
----
-
-## **🔧 Troubleshooting**
-### **1️⃣ `sentiment140.csv not found`**
-**Solution:** Download it manually from [Sentiment140](http://help.sentiment140.com/for-students) and move it into your project directory.
-
-### **2️⃣ `googleapiclient.errors.HttpError: quotaExceeded`**
-**Cause:** You’ve reached your **YouTube API quota limit**.  
-**Solution:** Wait 24 hours or apply for a **higher quota limit** in your [Google Cloud Console](https://console.cloud.google.com/).
-
-### **3️⃣ `ModuleNotFoundError: No module named 'googleapiclient'`**
-**Solution:** Install missing dependencies:
 ```bash
-pip install -r requirements.txt
-```
-
-### **4️⃣ `youtube_comments.csv not found`**
-**Cause:** You ran `sentiment_analysis.py` before `youtube_comments.py`.  
-**Solution:** Run:
-```bash
-python youtube_comments.py
-```
-**first**, then run:
-```bash
-python sentiment_analysis.py
+python cli.py "https://www.youtube.com/watch?v=VIDEO_ID" --comments 1000 --sort top
+python cli.py demo                          # sample data, no key needed
+python cli.py VIDEO_ID --json report.json --csv comments.csv
 ```
 
 ---
+
+## 🔌 API
+
+The web UI is powered by a JSON API you can call directly:
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/analyze?url=…&max_comments=500&sort_by=relevance` | Full report for one video |
+| `GET /api/compare?url_a=…&url_b=…` | Two reports for side-by-side comparison |
+| `GET /api/export/{video_id}.csv` | Scored comments as CSV (analyze first) |
+| `GET /api/export/{video_id}.json` | Full report as JSON |
+| `GET /api/status` | Whether an API key is configured |
+
+Interactive docs at **http://127.0.0.1:8000/docs**.
+
+---
+
+## 📁 Project layout
+
+```
+app/
+  main.py        FastAPI app + API routes
+  analysis.py    Report builder (breakdown, timeline, keywords, agreement…)
+  sentiment.py   VADER engine + YouTube slang lexicon + keyword extraction
+  youtube.py     YouTube Data API: metadata, comments, transcripts
+  demo.py        Bundled sample data (demo mode)
+  config.py      API key loading (.env / environment)
+static/          Web frontend (HTML/CSS/JS + Chart.js)
+cli.py           Command-line interface
+```
+
+---
+
+## 🔧 Troubleshooting
+
+- **"YouTube API quota exceeded"** — the free tier allows ~10,000 units/day; fetching
+  comments costs 1 unit per 100 comments. Wait for the daily reset or request more quota.
+- **"Comments are disabled for this video"** — nothing to analyze on that video.
+- **"No transcript available"** — agreement analysis is skipped; everything else still works.
+- **Charts don't load** — Chart.js is loaded from a CDN; check your internet connection.
