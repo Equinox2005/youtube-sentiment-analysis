@@ -1,150 +1,164 @@
-"""Orchestrates a full sentiment report for a YouTube video."""
+"""Single-video comment intelligence.
+
+Same engine as a niche study, scoped to one video. The output is deliberately
+not a sentiment breakdown: a positive/negative split on YouTube comments lands
+in the same narrow band for almost every video and cannot separate two videos
+that are nothing alike. What a creator can act on is the specific stuff —
+what was requested, what confused people, what got disputed, which moments
+people rewound to.
+"""
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import asdict
+from collections import Counter, defaultdict
 
-from .sentiment import extract_keywords, score_long_text, score_text
+from .extraction import UsageMeter
+from .niche import (
+    CAVEATS,
+    Corpus,
+    build_themes,
+    extract_records,
+    fold_candidates,
+    product_report,
+    trust_report,
+    vocabulary_report,
+)
+from .textutil import format_timestamp, timestamp_seconds
 from .youtube import (
     Comment,
+    QuotaMeter,
     VideoInfo,
     extract_video_id,
     fetch_comments,
-    fetch_transcript,
     fetch_video_info,
 )
 
-
-def _health_score(avg_compound: float, pos_pct: float, neg_pct: float) -> int:
-    """0-100 'community health' score blending average tone and balance."""
-    base = (avg_compound + 1) / 2 * 100  # map [-1,1] -> [0,100]
-    balance_bonus = (pos_pct - neg_pct) * 0.15
-    return max(0, min(100, round(base + balance_bonus)))
+# Comment timestamps cluster loosely around a moment, so bucket before counting.
+_BUCKET_SECONDS = 30
 
 
-def _timeline(scored: list[dict]) -> list[dict]:
-    """Bucket average sentiment by month of comment publication."""
-    buckets: dict[str, list[float]] = defaultdict(list)
-    for item in scored:
-        date = item.get("published_at", "")
-        if len(date) >= 7:
-            buckets[date[:7]].append(item["compound"])
-    return [
-        {
-            "period": period,
-            "avg_compound": round(sum(vals) / len(vals), 4),
-            "count": len(vals),
-        }
-        for period, vals in sorted(buckets.items())
-    ]
+def timestamp_heatmap(comments: list[Comment], limit: int = 12) -> list[dict]:
+    """Which moments the audience actually reacted to.
+
+    The old engine stripped timestamps as noise before scoring. They are one of
+    the few genuinely precise signals in a comment section.
+    """
+    buckets: dict[int, dict] = defaultdict(
+        lambda: {"count": 0, "likes": 0, "examples": [], "exact": Counter()}
+    )
+    for comment in comments:
+        seen: set[int] = set()
+        for seconds in timestamp_seconds(comment.text):
+            bucket = seconds // _BUCKET_SECONDS
+            if bucket in seen:
+                continue
+            seen.add(bucket)
+            entry = buckets[bucket]
+            entry["count"] += 1
+            entry["likes"] += comment.likes
+            entry["exact"][seconds] += 1
+            if len(entry["examples"]) < 3:
+                entry["examples"].append(
+                    {
+                        "quote": comment.text[:200],
+                        "author": comment.author,
+                        "likes": comment.likes,
+                    }
+                )
+
+    moments = []
+    for bucket, entry in buckets.items():
+        if entry["count"] < 2:
+            continue
+        # Report the moment people actually cited, not the bucket boundary — the
+        # bucket exists only to group near-misses, and a creator needs a real
+        # timestamp they can seek to.
+        seconds = entry["exact"].most_common(1)[0][0]
+        moments.append(
+            {
+                "seconds": seconds,
+                "timestamp": format_timestamp(seconds),
+                "window": [bucket * _BUCKET_SECONDS, (bucket + 1) * _BUCKET_SECONDS],
+                "count": entry["count"],
+                "likes": entry["likes"],
+                "examples": entry["examples"],
+            }
+        )
+    moments.sort(key=lambda moment: (moment["count"], moment["likes"]), reverse=True)
+    return moments[:limit]
+
+
+def _flatten_questions(themes: dict[str, list[dict]], limit: int = 15) -> list[dict]:
+    """Top unanswered questions — the cheapest reply a creator can make."""
+    rows = []
+    for theme in themes.get("question", []):
+        example = theme["examples"][0] if theme["examples"] else {}
+        rows.append(
+            {
+                "question": theme["title"],
+                "detail": theme["description"],
+                "asked_by": theme["count"],
+                "likes": theme["likes"],
+                "example": example.get("quote", ""),
+                "author": example.get("author", ""),
+            }
+        )
+    rows.sort(key=lambda row: (row["asked_by"], row["likes"]), reverse=True)
+    return rows[:limit]
 
 
 def build_report(
     video: VideoInfo,
     comments: list[Comment],
-    transcript: str | None,
+    quota: QuotaMeter | None = None,
+    usage: UsageMeter | None = None,
 ) -> dict:
-    """Compute the full analysis report from already-fetched data."""
-    scored: list[dict] = []
-    for comment in comments:
-        result = score_text(comment.text)
-        scored.append(
-            {
-                "text": comment.text,
-                "author": comment.author,
-                "likes": comment.likes,
-                "published_at": comment.published_at,
-                "reply_count": comment.reply_count,
-                "label": result["label"],
-                "compound": round(result["compound"], 4),
-            }
-        )
+    """Compute the full comment-intelligence report from already-fetched data."""
+    usage = usage or UsageMeter()
+    quota = quota or QuotaMeter()
 
-    total = len(scored)
-    pos = [s for s in scored if s["label"] == "positive"]
-    neg = [s for s in scored if s["label"] == "negative"]
-    neu = [s for s in scored if s["label"] == "neutral"]
-
-    avg_compound = sum(s["compound"] for s in scored) / total if total else 0.0
-
-    # Like-weighted average: what the community endorses, not just what it says.
-    weight_sum = sum(s["likes"] + 1 for s in scored)
-    weighted_compound = (
-        sum(s["compound"] * (s["likes"] + 1) for s in scored) / weight_sum if total else 0.0
-    )
-
-    pos_pct = len(pos) / total * 100 if total else 0.0
-    neg_pct = len(neg) / total * 100 if total else 0.0
-    neu_pct = len(neu) / total * 100 if total else 0.0
-
-    # Transcript / video sentiment and agreement.
-    video_sentiment = score_long_text(transcript) if transcript else {
-        "label": "unknown",
-        "compound": 0.0,
+    corpus = Corpus(channels=[], videos=[video], comments=comments, quota=quota)
+    records, spam_keys, vocabulary, signals = extract_records(corpus, usage)
+    candidates = fold_candidates(records)
+    themes = build_themes(candidates, usage)
+    clean_themes = {
+        kind: [{k: v for k, v in theme.items() if not k.startswith("_")} for theme in kind_themes]
+        for kind, kind_themes in themes.items()
     }
-    agreement = None
-    if video_sentiment["label"] not in ("unknown", "neutral") and total:
-        agreeing = [
-            s
-            for s in scored
-            if s["label"] == video_sentiment["label"] and s["label"] != "neutral"
-        ]
-        opposing = [
-            s
-            for s in scored
-            if s["label"] not in ("neutral", video_sentiment["label"])
-        ]
-        judged = len(agreeing) + len(opposing)
-        agreement = {
-            "agree": len(agreeing),
-            "disagree": len(opposing),
-            "neutral": total - judged,
-            "agree_pct": round(len(agreeing) / judged * 100, 2) if judged else 0.0,
-        }
 
-    top_positive = sorted(pos, key=lambda s: (s["compound"], s["likes"]), reverse=True)[:5]
-    top_negative = sorted(neg, key=lambda s: (s["compound"], -s["likes"]))[:5]
-    most_liked = sorted(scored, key=lambda s: s["likes"], reverse=True)[:5]
+    counts = {kind: sum(theme["count"] for theme in v) for kind, v in clean_themes.items()}
 
     return {
-        "video": asdict(video),
-        "summary": {
-            "total_comments": total,
-            "positive": len(pos),
-            "negative": len(neg),
-            "neutral": len(neu),
-            "positive_pct": round(pos_pct, 2),
-            "negative_pct": round(neg_pct, 2),
-            "neutral_pct": round(neu_pct, 2),
-            "avg_compound": round(avg_compound, 4),
-            "weighted_compound": round(weighted_compound, 4),
-            "health_score": _health_score(avg_compound, pos_pct, neg_pct),
-            "verdict": _verdict(avg_compound, pos_pct, neg_pct),
+        "video": {
+            "video_id": video.video_id,
+            "title": video.title,
+            "channel": video.channel,
+            "channel_id": video.channel_id,
+            "published_at": video.published_at,
+            "thumbnail": video.thumbnail,
+            "view_count": video.view_count,
+            "like_count": video.like_count,
+            "comment_count": video.comment_count,
+            "description": video.description,
+            "tags": video.tags,
         },
-        "video_sentiment": video_sentiment,
-        "agreement": agreement,
-        "timeline": _timeline(scored),
-        "keywords": extract_keywords([s["text"] for s in scored]),
-        "top_positive": top_positive,
-        "top_negative": top_negative,
-        "most_liked": most_liked,
-        "comments": scored,
+        "summary": {
+            "comments_analyzed": len(comments),
+            "spam_filtered": len(spam_keys),
+            "items_extracted": len(records),
+            "distinct_statements": sum(len(v) for v in candidates.values()),
+            "counts_by_kind": counts,
+        },
+        "themes": clean_themes,
+        "questions": _flatten_questions(clean_themes),
+        "timestamps": timestamp_heatmap(comments),
+        "products": product_report(records),
+        "vocabulary": vocabulary_report(vocabulary, [video]),
+        "trust": trust_report(signals),
+        "quota": quota.as_dict(),
+        "usage": usage.as_dict(),
+        "caveats": CAVEATS,
     }
-
-
-def _verdict(avg: float, pos_pct: float, neg_pct: float) -> str:
-    if avg >= 0.35 and pos_pct >= 60:
-        return "Overwhelmingly positive — the audience loves this video."
-    if avg >= 0.15:
-        return "Mostly positive — the community response is favorable."
-    if avg <= -0.35 and neg_pct >= 60:
-        return "Overwhelmingly negative — the audience strongly dislikes this video."
-    if avg <= -0.15:
-        return "Mostly negative — the community response leans critical."
-    if abs(pos_pct - neg_pct) < 10 and pos_pct > 20:
-        return "Divisive — the audience is split between praise and criticism."
-    return "Mixed/neutral — no strong sentiment either way."
 
 
 def analyze_video(
@@ -152,11 +166,12 @@ def analyze_video(
     url_or_id: str,
     max_comments: int = 500,
     sort_by: str = "relevance",
-    include_transcript: bool = True,
 ) -> dict:
-    """Fetch everything for a video and build the full report."""
+    """Fetch a video's comments and build the comment-intelligence report."""
+    quota = QuotaMeter()
     video_id = extract_video_id(url_or_id)
-    video = fetch_video_info(api_key, video_id)
-    comments = fetch_comments(api_key, video_id, max_comments=max_comments, sort_by=sort_by)
-    transcript = fetch_transcript(video_id) if include_transcript else None
-    return build_report(video, comments, transcript)
+    video = fetch_video_info(api_key, video_id, meter=quota)
+    comments = fetch_comments(
+        api_key, video_id, max_comments=max_comments, sort_by=sort_by, meter=quota
+    )
+    return build_report(video, comments, quota=quota)
