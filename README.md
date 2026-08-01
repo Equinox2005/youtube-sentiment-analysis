@@ -1,61 +1,57 @@
-# ▶ YouTube Sentiment Insights
+# 🔭 YouTube Audience Research
 
-**A web app that shows you how an audience *really* feels about any YouTube video.**
+**Find what a niche keeps asking for that nobody has published.**
 
-Paste a video URL and get an interactive dashboard: sentiment breakdown, community
-health score, sentiment trends over time, top keywords, the most loved/hated comments,
-whether commenters agree with the video itself, side-by-side video comparison, and
-CSV/JSON export.
+Point it at a handful of channels in the same space. It pulls their recent
+catalogues, samples comments across all of them, and returns a research report:
+the demand nobody is serving, whose audiences overlap, which products get talked
+about, and what is changing month over month.
 
-Runs entirely on your machine — no accounts, no tracking.
+The unit of analysis is a **niche**, not a video. That is the whole point —
+single-video dashboards compete with YouTube Studio; nobody sells cheap
+niche-level audience research.
 
 ---
 
-## 🌟 What it does
+## Why this is not a sentiment tool
 
-| Feature | Why it's useful |
+It used to be. Sentiment scoring was removed because it could not answer a useful
+question:
+
+- **Polarity has no discriminating power here.** YouTube comments skew heavily
+  positive on almost every video, because people who dislike something leave
+  rather than comment. Average scores cluster in a narrow band, so two videos
+  that are nothing alike get near-identical numbers.
+- **Sarcasm inverts it.** "Great, another 10 minute ad" scores positive on any
+  lexicon model. It is a pacing complaint.
+- **Most comments have no polarity to measure.** Timestamps, in-jokes, "who's
+  watching in 2026". They land in a neutral bucket that is usually the largest
+  one, and it is a discard pile, not a finding.
+
+"82% positive" is not actionable. **"37 comments across 4 channels asked for a
+grinder-first buying guide, and nobody has published one"** is.
+
+---
+
+## What it produces
+
+| Output | What it answers |
 |---|---|
-| **Sentiment breakdown** (positive / negative / neutral) | Instant read on audience reception |
-| **Community health score** (0–100) & plain-English verdict | One number to compare videos at a glance |
-| **Like-weighted sentiment** | Weighs opinions by likes — what the community *endorses*, not just what it says |
-| **Sentiment over time** | See if reception improved or soured after upload (great for spotting controversies) |
-| **Top keywords** | What the conversation is actually about |
-| **Most positive / negative / liked comments** | Jump straight to the strongest reactions |
-| **Transcript agreement** | Does the audience agree with the video's own tone/message? |
-| **Compare two videos** | A/B thumbnails, competitors, before/after apology videos… |
-| **Export CSV / JSON** | Take the scored comments into Excel, pandas, wherever |
-| **Demo mode** | Try everything without an API key — just type `demo` |
+| **Content gaps** | Demand ranked by how poorly the published catalogue covers it — audience asks cross-referenced against every title, tag and description in the corpus |
+| **Rising** | Themes accelerating faster than the corpus: demand before it is obvious |
+| **Themes** | Requests, complaints, questions, confusions, factual pushback and specific praise, clustered with counts and quotes |
+| **Audience overlap** | Jaccard overlap between channels' commenter sets, and who owns an exclusive slice |
+| **Products** | Share of voice by product, with stance — from the audience's words, not the script |
+| **Trust signals** | Purchase intent, sponsorship skepticism, deference, expertise challenges, per channel. The influencer-vetting view |
+| **Audience vocabulary** | The words commenters use, with the creators' own title vocabulary subtracted out |
+| **Theme drift** | Monthly volume per theme |
 
-### Who benefits
-- **Creators** — read the room across thousands of comments in seconds; track reception over time.
-- **Marketers / brands** — vet influencers and measure campaign reception before partnering.
-- **Researchers / students** — export scored comment datasets with one click.
-- **Viewers** — check if a video is community-approved before spending 40 minutes on it.
+Single-video mode uses the same engine, plus a **timestamp heatmap** — the
+moments people actually rewound to, parsed from timestamps in the comments.
 
 ---
 
-## 🎯 Accuracy
-
-Earlier versions used a Naïve Bayes bag-of-words model trained on 2009-era tweets
-(Sentiment140), which required a manual 1.6M-row dataset download and misread modern
-comment language. This version uses **VADER**, a rule-based model built specifically
-for social-media text. It correctly handles:
-
-- **Negation** — "not good at all" → negative
-- **Intensity** — "AMAZING!!!" scores higher than "amazing"
-- **Emoji** — 🔥 ❤️ 💀 are scored
-- **Slang** — plus a custom YouTube lexicon (`goated`, `mid`, `clickbait`, `W`, `L`, …)
-- **Neutrality** — "Who's watching in 2026?" is neutral, not forced into pos/neg
-- Long transcripts are scored in chunks to avoid saturation
-- URLs and video timestamps (e.g. `10:24`) are stripped before scoring
-
-No dataset download, no training step — it just works.
-
----
-
-## 🛠 Setup
-
-### 1. Install
+## Setup
 
 ```bash
 git clone https://github.com/Equinox2005/youtube-sentiment-analysis.git
@@ -63,81 +59,157 @@ cd youtube-sentiment-analysis
 pip install -r requirements.txt
 ```
 
-### 2. Get a YouTube API key (free)
+Copy `.env.example` to `.env` and fill in two keys:
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project → enable **YouTube Data API v3** → create an **API key**
-3. Provide it via environment variable, or copy `.env.example` to `.env` and paste it in:
+- **`YOUTUBE_API_KEY`** — [Google Cloud Console](https://console.cloud.google.com/)
+  → enable *YouTube Data API v3* → create an API key. Free tier is 10,000 units/day.
+- **`ANTHROPIC_API_KEY`** — [Anthropic Console](https://console.anthropic.com/).
+  An `ant auth login` profile works instead.
 
-```bash
-# Windows (PowerShell)
-$env:YOUTUBE_API_KEY = "your-key-here"
-
-# macOS / Linux
-export YOUTUBE_API_KEY="your-key-here"
-```
-
-> **No key yet?** Type `demo` as the URL in the app (or run `python cli.py demo`)
-> to explore the full experience with bundled sample data.
-
-### 3. Run the web app
+No keys yet? Everything below works with `demo`, which ships a pre-computed study.
 
 ```bash
 uvicorn app.main:app
 ```
 
-Open **http://127.0.0.1:8000** — paste a URL, hit **Analyze**.
+Open **http://127.0.0.1:8000**.
 
 ---
 
-## 💻 Command line
-
-The same engine is available as a CLI:
+## Command line
 
 ```bash
-python cli.py "https://www.youtube.com/watch?v=VIDEO_ID" --comments 1000 --sort top
-python cli.py demo                          # sample data, no key needed
-python cli.py VIDEO_ID --json report.json --csv comments.csv
+python cli.py study @channel1 @channel2 @channel3 --videos 8 --comments 300
+python cli.py study demo
+python cli.py video "https://youtube.com/watch?v=VIDEO_ID"
+python cli.py estimate --channels 12 --videos 8 --comments 500
 ```
+
+`estimate` predicts a study's quota cost before you spend any of it.
 
 ---
 
-## 🔌 API
+## What it costs to run
 
-The web UI is powered by a JSON API you can call directly:
+### YouTube quota — the binding constraint, and it is fine
+
+`search.list` costs **100 units** per call and this tool never uses it. A
+channel's whole catalogue is reachable for far less: `channels.list` returns the
+`uploads` playlist ID, then `playlistItems` pages it at 1 unit per 50 videos.
+`videos.list` takes 50 IDs per call.
+
+A 12-channel, 96-video, ~48,000-comment study:
+
+```
+channels.list      12 IDs, batched        →    1 unit
+playlistItems.list 12 channels × 1 page   →   12 units
+videos.list        96 IDs, batched by 50  →    2 units
+commentThreads     96 videos × 5 pages    →  480 units
+                                          ─────────────
+                                             495 units
+```
+
+**About 20 full studies per day on the free tier.**
+
+### Model cost
+
+Two passes, deliberately split:
+
+- **Map** — reads raw comments, extracts structured items. Mechanical, high
+  volume, runs at low effort.
+- **Reduce** — clusters a few hundred pre-aggregated statements into themes.
+  Small input, and where the judgment lives.
+
+Between them sits a deterministic fold that collapses identical statements
+locally, so tens of thousands of items become a few hundred distinct strings
+before the expensive pass sees anything.
+
+Both default to **`claude-opus-5`**. For a ~48,000-comment study that is roughly
+**$9**, or **$4.50** through the Batches API. Two optional levers:
+
+```bash
+NICHE_MAP_MODEL=claude-haiku-4-5   # ~5x cheaper map pass, some loss of nuance
+NICHE_USE_BATCH_API=true           # 50% off, but can take up to 24 hours
+```
+
+With both, a full study lands around **$1**. The map pass is where nearly all
+the tokens go, so that switch is the one that matters — it is off by default
+because model choice is your call, not the tool's.
+
+---
+
+## HTTP API
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/analyze?url=…&max_comments=500&sort_by=relevance` | Full report for one video |
-| `GET /api/compare?url_a=…&url_b=…` | Two reports for side-by-side comparison |
-| `GET /api/export/{video_id}.csv` | Scored comments as CSV (analyze first) |
-| `GET /api/export/{video_id}.json` | Full report as JSON |
-| `GET /api/status` | Whether an API key is configured |
+| `GET /api/status` | Which keys are configured, which models are selected |
+| `GET /api/estimate?channels=12&videos_per_channel=8&comments_per_video=500` | Quota preflight |
+| `GET /api/study?channels=…` | Full niche study (minutes, not seconds) |
+| `GET /api/study/stream?channels=…` | Same, as server-sent events with progress |
+| `GET /api/analyze?url=…` | Single-video comment intelligence |
+| `GET /api/analyze/stream?url=…` | Same, streamed |
+| `GET /api/export/{id}/gaps.csv` | Content gaps as CSV |
+| `GET /api/export/{id}/themes.csv` | Themes as CSV |
+| `GET /api/export/{id}/overlap.csv` | Audience overlap edges as CSV |
+| `GET /api/export/{id}.json` | Full report |
 
-Interactive docs at **http://127.0.0.1:8000/docs**.
+Interactive docs at **/docs**.
 
 ---
 
-## 📁 Project layout
+## Project layout
 
 ```
 app/
-  main.py        FastAPI app + API routes
-  analysis.py    Report builder (breakdown, timeline, keywords, agreement…)
-  sentiment.py   VADER engine + YouTube slang lexicon + keyword extraction
-  youtube.py     YouTube Data API: metadata, comments, transcripts
-  demo.py        Bundled sample data (demo mode)
-  config.py      API key loading (.env / environment)
-static/          Web frontend (HTML/CSS/JS + Chart.js)
+  main.py        FastAPI routes, SSE progress streaming, CSV/JSON export
+  niche.py       Corpus building, content gaps, overlap graph, drift, products
+  analysis.py    Single-video report + timestamp heatmap
+  extraction.py  Map-reduce engine, sync and Batches API paths, usage metering
+  schemas.py     Structured-output models + strict JSON Schema
+  youtube.py     Channels, batched video fetch, comments, quota metering
+  textutil.py    Tokenising, normalisation, timestamp parsing
+  demo.py        Pre-computed sample reports (no keys needed)
+  config.py      Keys and model selection
+static/          Frontend — hand-rolled SVG charts, no CDN, light + dark
 cli.py           Command-line interface
 ```
 
 ---
 
-## 🔧 Troubleshooting
+## Read this before quoting any number
 
-- **"YouTube API quota exceeded"** — the free tier allows ~10,000 units/day; fetching
-  comments costs 1 unit per 100 comments. Wait for the daily reset or request more quota.
-- **"Comments are disabled for this video"** — nothing to analyze on that video.
-- **"No transcript available"** — agreement analysis is skipped; everything else still works.
-- **Charts don't load** — Chart.js is loaded from a CDN; check your internet connection.
+These ship inside every report, and they are not boilerplate:
+
+- **Commenters are not viewers.** Roughly one viewer in several hundred
+  comments, and those who do skew engaged and opinionated. Every count is a
+  measure of intensity among the vocal minority, not of the audience.
+- **Sampling is capped per video**, so videos with huge comment counts are
+  under-sampled relative to smaller ones.
+- **Themes are clustered by a language model.** The counts are exact; the
+  grouping is a judgment call. Spot-check against the quoted examples.
+- **Comment order matters.** `time` sampling is the default for studies because
+  `relevance` surfaces high-engagement comments and biases the draw. Single-video
+  mode defaults to `relevance`, which is right for a highlight reel and wrong for
+  research.
+
+**Before building anything that stores a corpus long-term**, check the current
+[YouTube API Services Terms](https://developers.google.com/youtube/terms/api-services-terms-of-service).
+There are rules on retaining and refreshing API data that constrain how a
+persistent panel can work. Nothing here persists anything to disk today — reports
+live in memory until the process exits — but that is the first thing to verify if
+you add storage.
+
+---
+
+## Troubleshooting
+
+- **"YouTube API quota exceeded"** — 10,000 units/day. Run `python cli.py estimate`
+  before large studies; quota resets at midnight Pacific.
+- **"No channel found for handle @…"** — handles resolve via `forHandle`. Try the
+  `UC…` channel ID from the channel's page source if a custom URL fails.
+- **"The model hit its output limit"** — lower `NICHE_BATCH_SIZE` (default 50).
+- **"Could not initialise the Anthropic client"** — set `ANTHROPIC_API_KEY` or run
+  `ant auth login`.
+- **A study seems slow** — it is fetching hundreds of pages and running hundreds
+  of model requests. Use the streaming endpoint or the CLI to watch progress, and
+  raise `NICHE_CONCURRENCY` if you have the rate limits for it.
