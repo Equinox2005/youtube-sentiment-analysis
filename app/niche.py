@@ -17,7 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from .extraction import UsageMeter, run_map, run_reduce
+from .extraction import (
+    MAX_REDUCE_CANDIDATES,
+    BatchFailed,
+    ExtractionError,
+    UsageMeter,
+    run_map,
+    run_reduce,
+)
 from .textutil import month_of, normalize_summary, token_set, tokens
 from .youtube import (
     Comment,
@@ -34,12 +41,12 @@ from .youtube import (
 # name instead, and praise is clustered but reported separately from the gaps.
 THEME_KINDS = ["request", "question", "complaint", "confusion", "correction", "praise"]
 
-DEMAND_KINDS = {"request", "question", "confusion"}
+DEMAND_KINDS = ("request", "question", "confusion")
 RECENT_WINDOW_DAYS = 90
 MIN_COMMENTERS_FOR_OVERLAP = 20
 
 CAVEATS = [
-    "Commenters are not viewers. Roughly one viewer in several hundred comments, "
+    "Commenters are not viewers. Only a small share of viewers ever comment, "
     "and those who do skew engaged and opinionated. Treat every count here as a "
     "signal of intensity among the vocal minority, not a measure of the audience.",
     "Comment sampling is capped per video, so videos with very large comment "
@@ -61,10 +68,6 @@ class Record:
     stance: str
     comment: Comment
     video: VideoInfo | None
-
-    @property
-    def channel_id(self) -> str:
-        return self.video.channel_id if self.video else ""
 
     @property
     def channel(self) -> str:
@@ -129,7 +132,7 @@ def build_corpus(
                 )
             )
         except YouTubeError:
-            continue  # comments disabled, or a transient failure — skip the video
+            pass  # comments disabled, or a transient failure — skip the video
         if progress:
             progress("comments", index, len(videos))
 
@@ -151,7 +154,10 @@ def extract_records(
     usage: UsageMeter,
     progress=None,
 ) -> tuple[list[Record], set[int], Counter, list[dict]]:
-    """Run the map pass and rejoin its output to the source comments."""
+    """Run the map pass and rejoin its output to the source comments.
+
+    `progress`, if given, is called as progress("extract", done, total).
+    """
     videos = corpus.videos_by_id
     by_video: dict[str, list[Comment]] = defaultdict(list)
     for comment in corpus.comments:
@@ -167,7 +173,11 @@ def extract_records(
         )
         jobs.append((video_comments, context))
 
-    mapped = run_map(jobs, usage, progress=progress)
+    mapped = run_map(
+        jobs,
+        usage,
+        progress=(lambda done, total: progress("extract", done, total)) if progress else None,
+    )
 
     records: list[Record] = []
     # Keyed by object identity rather than comment_id: the API omits IDs on some
@@ -293,19 +303,37 @@ def _theme_from_members(title: str, description: str, members: list[dict], kind:
     }
 
 
-def build_themes(candidates: dict[str, list[dict]], usage: UsageMeter) -> dict[str, list[dict]]:
-    """Cluster candidates into themes, one reduce call per kind (in parallel)."""
+def build_themes(
+    candidates: dict[str, list[dict]],
+    usage: UsageMeter,
+    progress=None,
+) -> dict[str, list[dict]]:
+    """Cluster candidates into themes, one reduce call per kind (in parallel).
+
+    A kind whose clustering call comes back unusable is left out rather than
+    sinking the report; `progress`, if given, is called as
+    progress("themes", done, total).
+    """
     kinds = [kind for kind in THEME_KINDS if candidates.get(kind)]
     if not kinds:
         return {}
 
     def cluster(kind: str):
-        head = candidates[kind][:400]
-        return kind, head, run_reduce(kind, head, usage)
+        head = candidates[kind][:MAX_REDUCE_CANDIDATES]
+        try:
+            return kind, head, run_reduce(kind, head, usage)
+        except BatchFailed as exc:
+            return kind, head, exc
 
     themes: dict[str, list[dict]] = {}
+    failures: list[BatchFailed] = []
     with ThreadPoolExecutor(max_workers=min(len(kinds), 6)) as pool:
-        for kind, head, result in pool.map(cluster, kinds):
+        for done, (kind, head, result) in enumerate(pool.map(cluster, kinds), start=1):
+            if progress:
+                progress("themes", done, len(kinds))
+            if isinstance(result, BatchFailed):
+                failures.append(result)
+                continue
             built = []
             for theme in result.themes:
                 members = [head[i] for i in theme.candidate_indices if 0 <= i < len(head)]
@@ -314,6 +342,10 @@ def build_themes(candidates: dict[str, list[dict]], usage: UsageMeter) -> dict[s
                 built.append(_theme_from_members(theme.title, theme.description, members, kind))
             built.sort(key=lambda item: (item["count"], item["likes"]), reverse=True)
             themes[kind] = built
+
+    usage.record_failures(len(failures))
+    if len(failures) == len(kinds):
+        raise ExtractionError(f"Clustering failed for every item kind. First error: {failures[0]}")
     return themes
 
 
@@ -595,7 +627,7 @@ def rising_themes(themes: dict[str, list[dict]], corpus: Corpus, limit: int = 12
     cutoff = reference - timedelta(days=RECENT_WINDOW_DAYS)
 
     recent_total = sum(1 for date in dates if date >= cutoff)
-    baseline = recent_total / len(dates) if dates else 0.0
+    baseline = recent_total / len(dates)
     if baseline <= 0:
         return []
 
@@ -649,7 +681,8 @@ def theme_drift(themes: dict[str, list[dict]], limit: int = 12) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def _strip_internals(themes: dict[str, list[dict]]) -> dict[str, list[dict]]:
+def strip_internals(themes: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Drop the `_records` back-references so themes can be serialised."""
     return {
         kind: [{k: v for k, v in theme.items() if not k.startswith("_")} for theme in kind_themes]
         for kind, kind_themes in themes.items()
@@ -660,7 +693,7 @@ def build_study_report(corpus: Corpus, usage: UsageMeter, label: str = "", progr
     """Run both model passes over a corpus and assemble the full report."""
     records, spam_keys, vocabulary, signals = extract_records(corpus, usage, progress=progress)
     candidates = fold_candidates(records)
-    themes = build_themes(candidates, usage)
+    themes = build_themes(candidates, usage, progress=progress)
 
     report = {
         "study": {
@@ -684,7 +717,7 @@ def build_study_report(corpus: Corpus, usage: UsageMeter, label: str = "", progr
         },
         "content_gaps": content_gaps(themes, corpus.videos),
         "rising": rising_themes(themes, corpus),
-        "themes": _strip_internals(themes),
+        "themes": strip_internals(themes),
         "audience_overlap": audience_overlap(corpus),
         "vocabulary": vocabulary_report(vocabulary, corpus.videos),
         "products": product_report(records),
@@ -706,19 +739,17 @@ def run_study(
     label: str = "",
     progress=None,
 ) -> dict:
-    """Fetch a niche corpus and produce the full research report."""
+    """Fetch a niche corpus and produce the full research report.
+
+    `progress`, if given, is called as progress(stage, done, total) with stage
+    one of "channels", "comments", "extract" or "themes".
+    """
     corpus = build_corpus(
         api_key,
         channel_refs,
         videos_per_channel=videos_per_channel,
         comments_per_video=comments_per_video,
         sort_by=sort_by,
-        progress=(lambda stage, done, total: progress(stage, done, total)) if progress else None,
+        progress=progress,
     )
-    usage = UsageMeter()
-    return build_study_report(
-        corpus,
-        usage,
-        label=label,
-        progress=(lambda done, total: progress("extract", done, total)) if progress else None,
-    )
+    return build_study_report(corpus, UsageMeter(), label=label, progress=progress)

@@ -31,10 +31,10 @@ def get_anthropic_key() -> str | None:
 
 # The map pass reads raw comments and is by far the larger token spend; the
 # reduce pass sees only extracted structure and is where the judgment lives.
-# Both default to Opus 5. Setting NICHE_MAP_MODEL=claude-haiku-4-5 cuts map-pass
-# cost roughly 5x with some loss of nuance on sarcastic or oblique comments.
-DEFAULT_MAP_MODEL = "claude-opus-5"
-DEFAULT_REDUCE_MODEL = "claude-opus-5"
+# Both default to Opus 5.5. NICHE_MAP_MODEL=claude-haiku-5-5 is about 40x
+# cheaper per token, with some loss of nuance on sarcastic or oblique comments.
+DEFAULT_MAP_MODEL = "claude-opus-5-5"
+DEFAULT_REDUCE_MODEL = "claude-opus-5-5"
 
 
 def get_map_model() -> str:

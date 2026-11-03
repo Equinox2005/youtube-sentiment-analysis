@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+import anthropic
+
 from .config import (
+    DEFAULT_MAP_MODEL,
     get_anthropic_key,
     get_batch_size,
     get_map_model,
@@ -34,17 +38,37 @@ class ExtractionError(Exception):
     """User-facing error while running the extraction passes."""
 
 
-# Per-million-token prices, used only for the cost estimate shown in reports.
+class BatchFailed(ExtractionError):
+    """One request came back unusable: refused, cut off, or unparseable.
+
+    Unlike a bad key or an unknown model, this only affects the one batch, so
+    the passes skip it and carry on instead of throwing away the whole study.
+    """
+
+
+# Per-million-token prices (input, output, cache read), used only for the cost
+# estimate shown in reports. Cache writes bill at 1.25x input.
 _PRICES = {
-    "claude-opus-5": (5.0, 25.0),
-    "claude-fable-5": (10.0, 50.0),
-    "claude-sonnet-5": (3.0, 15.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-fable-5-1": (10.0, 50.0, 0.25),
+    "claude-fable-5": (10.0, 50.0, 1.00),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.30),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+    "claude-haiku-4-5": (1.0, 5.0, 0.10),
 }
 
+# Models that take server-side fallbacks. If a safety classifier declines a
+# batch (comment sections trip them on ordinary text now and then), the API
+# re-runs it on another model instead of returning a refusal. Not available on
+# the Batches API.
+_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
 _MAX_COMMENT_CHARS = 600
-_MAX_REDUCE_CANDIDATES = 400
+MAX_REDUCE_CANDIDATES = 400
 
 
 @dataclass
@@ -55,37 +79,50 @@ class UsageMeter:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     requests: int = 0
+    failed_requests: int = 0
     batched: bool = False
+    cost_usd: float = 0.0
     per_model: dict[str, list[int]] = field(default_factory=dict)
+    # The map and reduce passes both report from worker threads.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def add(self, model: str, usage) -> None:
-        inp = getattr(usage, "input_tokens", 0) or 0
-        out = getattr(usage, "output_tokens", 0) or 0
+    def add(self, model: str, usage, batched: bool = False) -> None:
+        fresh = getattr(usage, "input_tokens", 0) or 0
+        written = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cached = getattr(usage, "cache_read_input_tokens", 0) or 0
-        created = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        self.input_tokens += inp + cached + created
-        self.output_tokens += out
-        self.cache_read_tokens += cached
-        self.requests += 1
-        slot = self.per_model.setdefault(model, [0, 0])
-        slot[0] += inp + cached + created
-        slot[1] += out
+        out = getattr(usage, "output_tokens", 0) or 0
 
-    def estimated_cost_usd(self) -> float:
-        total = 0.0
-        for model, (inp, out) in self.per_model.items():
-            price_in, price_out = _PRICES.get(model, (5.0, 25.0))
-            total += inp / 1_000_000 * price_in + out / 1_000_000 * price_out
-        return round(total * (0.5 if self.batched else 1.0), 4)
+        price_in, price_out, price_cached = _PRICES.get(model, _PRICES[DEFAULT_MAP_MODEL])
+        cost = (
+            fresh * price_in + written * price_in * 1.25 + cached * price_cached + out * price_out
+        ) / 1_000_000
+        if batched:
+            cost *= 0.5  # the Batches API bills at half price
+
+        with self._lock:
+            self.input_tokens += fresh + written + cached
+            self.output_tokens += out
+            self.cache_read_tokens += cached
+            self.requests += 1
+            self.batched = self.batched or batched
+            self.cost_usd += cost
+            slot = self.per_model.setdefault(model, [0, 0])
+            slot[0] += fresh + written + cached
+            slot[1] += out
+
+    def record_failures(self, count: int) -> None:
+        with self._lock:
+            self.failed_requests += count
 
     def as_dict(self) -> dict:
         return {
             "requests": self.requests,
+            "failed_requests": self.failed_requests,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "batched": self.batched,
-            "estimated_cost_usd": self.estimated_cost_usd(),
+            "estimated_cost_usd": round(self.cost_usd, 4),
             "models": {m: {"input": i, "output": o} for m, (i, o) in self.per_model.items()},
         }
 
@@ -177,24 +214,14 @@ want more technical depth".
 verbatim as a theme unless it truly stands alone."""
 
 
-def _client():
-    try:
-        import anthropic
-    except ImportError as exc:  # pragma: no cover - dependency guard
-        raise ExtractionError(
-            "The 'anthropic' package is required for extraction. Run: pip install anthropic"
-        ) from exc
-
+def _client() -> anthropic.Anthropic:
     key = get_anthropic_key()
     try:
         # A bare constructor also picks up an `ant auth login` profile, so only
         # pass the key when we actually have one.
         return anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     except Exception as exc:
-        raise ExtractionError(
-            "Could not initialise the Anthropic client. Set ANTHROPIC_API_KEY "
-            "(or run `ant auth login`)."
-        ) from exc
+        raise ExtractionError(f"Could not set up the Anthropic client: {exc}") from exc
 
 
 def _truncate(text: str) -> str:
@@ -214,16 +241,20 @@ def _render_batch(comments: list[Comment], context: str) -> str:
 
 
 def _text_of(message) -> str:
-    if getattr(message, "stop_reason", None) == "refusal":
-        raise ExtractionError(
-            "The model declined to process this batch of comments. "
-            "This usually means the content tripped a safety classifier; "
-            "try a different video or a smaller sample."
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "refusal":
+        raise BatchFailed("The model declined to process this batch of comments.")
+    if stop_reason == "max_tokens":
+        raise BatchFailed(
+            "The model hit its output limit before finishing. Lower NICHE_BATCH_SIZE."
         )
-    for block in message.content:
-        if block.type == "text":
-            return block.text
-    raise ExtractionError("The model returned no text content.")
+    # After a fallback the content can hold a `fallback` marker between two text
+    # blocks (a stream that switched models mid-answer keeps what it had), so
+    # join every text block instead of taking the first.
+    text = "".join(block.text for block in message.content if block.type == "text")
+    if not text:
+        raise BatchFailed("The model returned no text content.")
+    return text
 
 
 def _request_params(model: str, system: str, user: str, schema: dict,
@@ -242,22 +273,38 @@ def _request_params(model: str, system: str, user: str, schema: dict,
     }
 
 
-def _complete(client, params: dict, usage: UsageMeter, stream: bool = False):
+def _complete(client, params: dict, usage: UsageMeter, stream: bool = False) -> str:
+    params = dict(params)
+    if params["model"] in _FALLBACK_MODELS:
+        params["betas"] = [_FALLBACK_BETA]
+        params["fallbacks"] = "default"
+
     try:
         if stream:
-            with client.messages.stream(**params) as streamed:
+            with client.beta.messages.stream(**params) as streamed:
                 message = streamed.get_final_message()
         else:
-            message = client.messages.create(**params)
-    except Exception as exc:
-        raise ExtractionError(f"Anthropic API error: {exc}") from exc
-
-    usage.add(params["model"], message.usage)
-    if getattr(message, "stop_reason", None) == "max_tokens":
+            message = client.beta.messages.create(**params)
+    except anthropic.AuthenticationError as exc:
+        raise ExtractionError("The Anthropic API rejected the key. Check ANTHROPIC_API_KEY.") from exc
+    except anthropic.RateLimitError as exc:
         raise ExtractionError(
-            "The model hit its output limit before finishing. Reduce the batch "
-            "size (NICHE_BATCH_SIZE) and try again."
-        )
+            "Rate limited by the Anthropic API. Lower NICHE_CONCURRENCY or try again shortly."
+        ) from exc
+    except anthropic.APIStatusError as exc:
+        raise ExtractionError(f"Anthropic API error ({exc.status_code}): {exc.message}") from exc
+    except anthropic.APIConnectionError as exc:
+        raise ExtractionError(f"Could not reach the Anthropic API: {exc}") from exc
+    except TypeError as exc:
+        # The SDK raises this when no key, token or profile is available.
+        if "authentication" not in str(exc):
+            raise
+        raise ExtractionError(
+            "No Anthropic credentials found. Set ANTHROPIC_API_KEY in .env, or run `ant auth login`."
+        ) from exc
+
+    # After a fallback, `model` names the model that actually answered.
+    usage.add(getattr(message, "model", None) or params["model"], message.usage)
     return _text_of(message)
 
 
@@ -273,11 +320,11 @@ def _parse_map(raw: str) -> MapResult:
         try:  # tolerate a stray wrapper if the schema was ever relaxed
             return MapResult.model_validate(json.loads(raw))
         except Exception as exc:
-            raise ExtractionError(f"Could not parse extraction output: {exc}") from exc
+            raise BatchFailed(f"Could not parse extraction output: {exc}") from exc
 
 
 def _map_sync(client, batches: list[tuple[list[Comment], str]], usage: UsageMeter,
-              progress=None) -> list[tuple[list[Comment], MapResult]]:
+              progress=None):
     schema = strict_schema(MapResult)
     model = get_map_model()
 
@@ -287,27 +334,40 @@ def _map_sync(client, batches: list[tuple[list[Comment], str]], usage: UsageMete
             model, MAP_SYSTEM, _render_batch(comments, context), schema,
             max_tokens=12000, effort="low",
         )
-        return comments, _parse_map(_complete(client, params, usage))
+        try:
+            return comments, _parse_map(_complete(client, params, usage))
+        except BatchFailed as exc:
+            return comments, exc
 
     results: list[tuple[list[Comment], MapResult]] = []
+    failures: list[BatchFailed] = []
     workers = min(get_max_concurrency(), max(1, len(batches)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for done, outcome in enumerate(pool.map(run, batches), start=1):
-            results.append(outcome)
-            if progress:
-                progress(done, len(batches))
-    return results
+        futures = [pool.submit(run, batch) for batch in batches]
+        try:
+            for done, future in enumerate(futures, start=1):
+                comments, outcome = future.result()
+                if isinstance(outcome, BatchFailed):
+                    failures.append(outcome)
+                else:
+                    results.append((comments, outcome))
+                if progress:
+                    progress(done, len(batches))
+        except BaseException:
+            # A bad key or model fails every batch the same way; stop sending them.
+            pool.shutdown(cancel_futures=True)
+            raise
+    return results, failures
 
 
 def _map_batched(client, batches: list[tuple[list[Comment], str]], usage: UsageMeter,
-                 progress=None) -> list[tuple[list[Comment], MapResult]]:
+                 progress=None):
     """Same work through the Batches API — half price, but not interactive."""
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
     from anthropic.types.messages.batch_create_params import Request
 
     schema = strict_schema(MapResult)
     model = get_map_model()
-    usage.batched = True
 
     requests = [
         Request(
@@ -322,6 +382,8 @@ def _map_batched(client, batches: list[tuple[list[Comment], str]], usage: UsageM
         for index, (comments, context) in enumerate(batches)
     ]
 
+    by_id: dict[str, MapResult] = {}
+    failures: list[BatchFailed] = []
     try:
         batch = client.messages.batches.create(requests=requests)
         while True:
@@ -332,24 +394,28 @@ def _map_batched(client, batches: list[tuple[list[Comment], str]], usage: UsageM
                 progress(batch.request_counts.succeeded, len(requests))
             time.sleep(15)
 
-        by_id: dict[str, MapResult] = {}
         for result in client.messages.batches.results(batch.id):
             if result.result.type != "succeeded":
+                failures.append(BatchFailed(f"A batch request {result.result.type}."))
                 continue
             message = result.result.message
-            usage.add(model, message.usage)
-            by_id[result.custom_id] = _parse_map(_text_of(message))
+            usage.add(message.model or model, message.usage, batched=True)
+            try:
+                by_id[result.custom_id] = _parse_map(_text_of(message))
+            except BatchFailed as exc:
+                failures.append(exc)
     except ExtractionError:
         raise
     except Exception as exc:
         raise ExtractionError(f"Batch extraction failed: {exc}") from exc
 
     # Results come back in arbitrary order — key by custom_id, never by position.
-    return [
+    results = [
         (comments, by_id[f"batch-{index}"])
         for index, (comments, _) in enumerate(batches)
         if f"batch-{index}" in by_id
     ]
+    return results, failures
 
 
 def run_map(
@@ -357,7 +423,12 @@ def run_map(
     usage: UsageMeter,
     progress=None,
 ) -> list[tuple[list[Comment], MapResult]]:
-    """Run the map pass over (comments, context) jobs, splitting into batches."""
+    """Run the map pass over (comments, context) jobs, splitting into batches.
+
+    Batches that come back refused, cut off or unparseable are skipped and
+    counted in `usage.failed_requests`. The pass only fails outright when every
+    batch does, or on an error that would hit all of them (bad key, bad model).
+    """
     client = _client()
     size = get_batch_size()
 
@@ -369,7 +440,11 @@ def run_map(
     if not batches:
         return []
     runner = _map_batched if use_batch_api() else _map_sync
-    return runner(client, batches, usage, progress)
+    results, failures = runner(client, batches, usage, progress)
+    usage.record_failures(len(failures))
+    if failures and not results:
+        raise ExtractionError(f"Every extraction request failed. First error: {failures[0]}")
+    return results
 
 
 # --------------------------------------------------------------------------
@@ -383,7 +458,7 @@ def run_reduce(kind: str, candidates: list[dict], usage: UsageMeter) -> ReduceRe
         return ReduceResult(themes=[])
 
     client = _client()
-    head = candidates[:_MAX_REDUCE_CANDIDATES]
+    head = candidates[:MAX_REDUCE_CANDIDATES]
     lines = [
         f"Item kind: {kind}",
         f"{len(head)} candidate statements, each with the number of distinct "
@@ -396,12 +471,14 @@ def run_reduce(kind: str, candidates: list[dict], usage: UsageMeter) -> ReduceRe
             f"{candidate['summary']}"
         )
 
+    # Streamed because thinking counts toward max_tokens and a long non-streaming
+    # request risks an HTTP timeout.
     params = _request_params(
         get_reduce_model(), REDUCE_SYSTEM, "\n".join(lines),
-        strict_schema(ReduceResult), max_tokens=32000, effort="high",
+        strict_schema(ReduceResult), max_tokens=64000, effort="high",
     )
     raw = _complete(client, params, usage, stream=True)
     try:
         return ReduceResult.model_validate_json(raw)
     except Exception as exc:
-        raise ExtractionError(f"Could not parse clustering output: {exc}") from exc
+        raise BatchFailed(f"Could not parse clustering output: {exc}") from exc

@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .analysis import analyze_video
 from .config import get_anthropic_key, get_api_key, get_map_model, get_reduce_model, use_batch_api
 from .demo import demo_study, demo_video_report
@@ -21,12 +22,14 @@ from .extraction import ExtractionError
 from .niche import run_study
 from .youtube import YouTubeError, estimate_quota
 
-app = FastAPI(title="YouTube Audience Research", version="3.0.0")
+app = FastAPI(title="YouTube Audience Research", version=__version__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 # In-memory store of recent reports; also what the export endpoints read from.
+# Streamed runs store from worker threads, hence the lock.
 _reports: dict[str, dict] = {}
+_reports_lock = threading.Lock()
 _CACHE_LIMIT = 20
 
 
@@ -34,9 +37,10 @@ def _store(report: dict, kind: str) -> str:
     report_id = report.get("video", {}).get("video_id") or uuid.uuid4().hex[:12]
     report["_id"] = report_id
     report["_kind"] = kind
-    _reports[report_id] = report
-    while len(_reports) > _CACHE_LIMIT:
-        _reports.pop(next(iter(_reports)))
+    with _reports_lock:
+        _reports[report_id] = report
+        while len(_reports) > _CACHE_LIMIT:
+            _reports.pop(next(iter(_reports)))
     return report_id
 
 
@@ -209,6 +213,7 @@ def analyze_stream(
     max_comments: int = Query(500, ge=10, le=5000),
     sort_by: str = Query("relevance", pattern="^(relevance|time)$"),
 ):
+    """Same as /api/analyze, streamed with progress events."""
     if url.strip().lower() == "demo":
         def demo_work(_progress):
             report = demo_video_report()
@@ -219,8 +224,10 @@ def analyze_stream(
 
     api_key = _require_youtube_key()
 
-    def work(_progress):
-        report = analyze_video(api_key, url, max_comments=max_comments, sort_by=sort_by)
+    def work(progress):
+        report = analyze_video(
+            api_key, url, max_comments=max_comments, sort_by=sort_by, progress=progress
+        )
         _store(report, "video")
         return report
 
@@ -228,7 +235,8 @@ def analyze_stream(
 
 
 def _get_report(report_id: str) -> dict:
-    report = _reports.get(report_id)
+    with _reports_lock:
+        report = _reports.get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found — run the analysis first.")
     return report

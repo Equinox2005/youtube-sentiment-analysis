@@ -20,6 +20,7 @@ from .niche import (
     extract_records,
     fold_candidates,
     product_report,
+    strip_internals,
     trust_report,
     vocabulary_report,
 )
@@ -112,19 +113,16 @@ def build_report(
     comments: list[Comment],
     quota: QuotaMeter | None = None,
     usage: UsageMeter | None = None,
+    progress=None,
 ) -> dict:
     """Compute the full comment-intelligence report from already-fetched data."""
     usage = usage or UsageMeter()
     quota = quota or QuotaMeter()
 
     corpus = Corpus(channels=[], videos=[video], comments=comments, quota=quota)
-    records, spam_keys, vocabulary, signals = extract_records(corpus, usage)
+    records, spam_keys, vocabulary, signals = extract_records(corpus, usage, progress=progress)
     candidates = fold_candidates(records)
-    themes = build_themes(candidates, usage)
-    clean_themes = {
-        kind: [{k: v for k, v in theme.items() if not k.startswith("_")} for theme in kind_themes]
-        for kind, kind_themes in themes.items()
-    }
+    clean_themes = strip_internals(build_themes(candidates, usage, progress=progress))
 
     counts = {kind: sum(theme["count"] for theme in v) for kind, v in clean_themes.items()}
 
@@ -166,12 +164,21 @@ def analyze_video(
     url_or_id: str,
     max_comments: int = 500,
     sort_by: str = "relevance",
+    progress=None,
 ) -> dict:
-    """Fetch a video's comments and build the comment-intelligence report."""
+    """Fetch a video's comments and build the comment-intelligence report.
+
+    `progress`, if given, is called as progress(stage, done, total) with stage
+    one of "comments", "extract" or "themes".
+    """
     quota = QuotaMeter()
     video_id = extract_video_id(url_or_id)
     video = fetch_video_info(api_key, video_id, meter=quota)
+    if progress:
+        progress("comments", 0, 1)
     comments = fetch_comments(
         api_key, video_id, max_comments=max_comments, sort_by=sort_by, meter=quota
     )
-    return build_report(video, comments, quota=quota)
+    if progress:
+        progress("comments", 1, 1)
+    return build_report(video, comments, quota=quota, progress=progress)
