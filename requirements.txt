@@ -1,7 +1,6 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-google-api-python-client>=2.100
-youtube-transcript-api>=0.6.2
-anthropic>=0.69
-pydantic>=2.6
-python-dotenv>=1.0
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+google-api-python-client==2.201.0
+anthropic==2.4.0
+pydantic==2.14.2
+python-dotenv==1.2.4

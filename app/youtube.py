@@ -1,4 +1,4 @@
-"""YouTube Data API helpers: channels, videos, comments, and transcripts.
+"""YouTube Data API helpers: channels, videos, and comments.
 
 Quota notes (units per call; the free tier allows 10,000 units/day):
 
@@ -379,21 +379,6 @@ def fetch_comments(
         raise _translate_http_error(exc) from exc
 
     return comments[:max_comments]
-
-
-def fetch_transcript(video_id: str) -> str | None:
-    """Return the video transcript as plain text, or None if unavailable."""
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-
-        try:  # v1.x API
-            fetched = YouTubeTranscriptApi().fetch(video_id)
-            return " ".join(snippet.text for snippet in fetched)
-        except AttributeError:  # v0.6.x API
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            return " ".join(entry["text"] for entry in transcript)
-    except Exception:
-        return None
 
 
 def estimate_quota(channels: int, videos_per_channel: int, comments_per_video: int) -> dict:

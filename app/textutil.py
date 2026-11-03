@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-_URL_RE = re.compile(r"https?://\S+")
 _TIMESTAMP_RE = re.compile(r"\b(\d{1,2}):([0-5]\d)(?::([0-5]\d))?\b")
 _WHITESPACE_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z'\-]{2,}")
@@ -22,12 +21,6 @@ STOPWORDS = frozenset(
     actually basically literally definitely probably maybe thanks thank please
     make making makes need needs needed use used using""".split()
 )
-
-
-def clean_text(text: str) -> str:
-    """Strip URLs and collapse whitespace."""
-    text = _URL_RE.sub("", text)
-    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def tokens(text: str) -> list[str]:

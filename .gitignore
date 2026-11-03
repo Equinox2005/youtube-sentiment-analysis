@@ -1,9 +1,11 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 .env
 .venv/
 venv/
 .idea/
+.claude/
 *.csv
 !*.example
 report.json
