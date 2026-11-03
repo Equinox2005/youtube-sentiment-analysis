@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import sys
+import textwrap
 
 # Windows consoles often default to cp1252, which cannot print box characters.
 if hasattr(sys.stdout, "reconfigure"):
@@ -29,20 +30,18 @@ def _header(text: str) -> None:
 
 
 def _wrap(text: str, width: int = 74, indent: str = "   ") -> str:
-    import textwrap
-
     return textwrap.fill(text, width=width, initial_indent=indent, subsequent_indent=indent)
 
 
 def _progress(stage: str, done: int, total: int) -> None:
     label = {"channels": "Resolving channels", "comments": "Fetching comments",
-             "extract": "Extracting"}.get(stage, stage)
+             "extract": "Extracting", "themes": "Clustering themes"}.get(stage, stage)
     print(f"\r   {label}: {done}/{total}   ", end="", flush=True)
     if done >= total:
         print()
 
 
-def _need_keys() -> tuple[str, bool]:
+def _need_key() -> str:
     api_key = get_api_key()
     if not api_key:
         print("Error: set YOUTUBE_API_KEY (or put it in a .env file).")
@@ -51,7 +50,15 @@ def _need_keys() -> tuple[str, bool]:
     if not get_anthropic_key():
         print("Note: ANTHROPIC_API_KEY is not set. Extraction will try an `ant auth login`")
         print("      profile instead; if that is missing too, the run will fail.\n")
-    return api_key, True
+    return api_key
+
+
+def _print_cost(report: dict) -> None:
+    quota, usage = report["quota"], report["usage"]
+    print(f"   Quota: {quota['units']} / {quota['daily_free_tier']:,} units · "
+          f"Model: {usage['requests']} requests, ~${usage['estimated_cost_usd']:.2f}")
+    if usage.get("failed_requests"):
+        print(f"   {usage['failed_requests']} request(s) came back unusable and were skipped.")
 
 
 # --------------------------------------------------------------------------
@@ -59,19 +66,21 @@ def _need_keys() -> tuple[str, bool]:
 # --------------------------------------------------------------------------
 
 
+def _sample_note(report: dict) -> str:
+    return "  (sample data)" if report.get("demo") else ""
+
+
 def print_study(report: dict) -> None:
     study = report["study"]
-    _header(f"📚 {study['label']}")
+    _header(study["label"] + _sample_note(report))
     print(f"   {len(study['channels'])} channels · {study['videos_sampled']} videos · "
           f"{study['comments_sampled']:,} comments sampled")
     print(f"   {study['items_extracted']:,} items extracted → "
           f"{study['distinct_statements']:,} distinct statements · "
           f"{study['spam_filtered']:,} spam filtered")
-    quota, usage = report["quota"], report["usage"]
-    print(f"   Quota: {quota['units']} / {quota['daily_free_tier']:,} units · "
-          f"Model: {usage['requests']} requests, ~${usage['estimated_cost_usd']:.2f}")
+    _print_cost(report)
 
-    _header("🎯 Content gaps — demand nobody has served")
+    _header("Content gaps")
     if not report["content_gaps"]:
         print("   No gaps surfaced.")
     for index, gap in enumerate(report["content_gaps"][:10], start=1):
@@ -86,14 +95,14 @@ def print_study(report: dict) -> None:
             print(f"    “{gap['examples'][0]['quote'][:150]}”")
 
     if report.get("rising"):
-        _header("📈 Rising — accelerating faster than the corpus")
+        _header("Rising")
         for row in report["rising"][:6]:
             print(f"   {row['lift']:>4.1f}x  {row['title']}  "
                   f"({row['recent']}/{row['total']} in the last 90 days)")
 
     overlap = report.get("audience_overlap", {})
     if overlap.get("nodes"):
-        _header("🕸  Audience overlap")
+        _header("Audience overlap")
         for node in overlap["nodes"]:
             print(f"   {node['channel'][:34]:<34} {node['commenters']:>6,} commenters · "
                   f"{node['exclusive_pct']:>5.1f}% exclusive")
@@ -104,32 +113,36 @@ def print_study(report: dict) -> None:
                       f"{edge['shared']:>5,} shared ({edge['jaccard']:.3f} Jaccard)")
 
     if report.get("products"):
-        _header("📦 Products by share of voice")
+        _header("Products by share of voice")
         for row in report["products"][:10]:
             stance = f"{row['net_stance']:+.2f}"
             print(f"   {row['product'][:30]:<30} {row['mentions']:>5} mentions · "
                   f"net {stance} · {row['channel_spread']} channels")
 
     if report.get("trust"):
-        _header("🤝 Trust signals by channel")
+        _header("Trust signals by channel")
         for row in report["trust"][:10]:
             print(f"   {row['channel'][:30]:<30} ratio {row['trust_ratio']:.2f} · "
                   f"{row['purchase_intent']} intent · "
                   f"{row['sponsorship_skepticism']} skeptical")
 
     if report.get("vocabulary"):
-        _header("🗣  Audience vocabulary")
+        _header("Audience vocabulary")
         terms = ", ".join(f"{row['term']} ({row['count']})" for row in report["vocabulary"][:14])
         print(_wrap(terms))
 
-    _header("⚠️  Read this before quoting any number above")
+    _print_caveats(report)
+
+
+def _print_caveats(report: dict) -> None:
+    _header("Caveats")
     for caveat in report["caveats"]:
-        print(_wrap(f"• {caveat}", indent="   "))
+        print(textwrap.fill(caveat, width=74, initial_indent="   • ", subsequent_indent="     "))
 
 
 def print_video(report: dict) -> None:
     video, summary = report["video"], report["summary"]
-    _header(f"🎬 {video['title']}  —  {video['channel']}")
+    _header(f"{video['title']}  —  {video['channel']}{_sample_note(report)}")
     print(f"   {video['view_count']:,} views · {video['like_count']:,} likes · "
           f"{video['comment_count']:,} comments")
     print(f"   {summary['comments_analyzed']} analyzed → {summary['items_extracted']} items, "
@@ -137,18 +150,19 @@ def print_video(report: dict) -> None:
     counts = ", ".join(f"{k} {v}" for k, v in summary["counts_by_kind"].items())
     if counts:
         print(f"   {counts}")
+    _print_cost(report)
 
     if report.get("questions"):
-        _header("❓ Top unanswered questions")
+        _header("Top unanswered questions")
         for index, row in enumerate(report["questions"][:8], start=1):
             print(f"{index:2}. {row['question']}  ({row['asked_by']} asked · "
                   f"{row['likes']:,} likes)")
             if row.get("example"):
                 print(f"    “{row['example'][:140]}”")
 
-    for kind, label in (("complaint", "🔧 Complaints"), ("confusion", "🌀 Confusion"),
-                        ("correction", "📌 Factual pushback"), ("request", "📥 Requests"),
-                        ("praise", "💚 What specifically worked")):
+    for kind, label in (("complaint", "Complaints"), ("confusion", "Confusion"),
+                        ("correction", "Factual pushback"), ("request", "Requests"),
+                        ("praise", "What worked")):
         themes = report.get("themes", {}).get(kind, [])
         if not themes:
             continue
@@ -159,7 +173,7 @@ def print_video(report: dict) -> None:
             print(_wrap(theme["description"], indent="     "))
 
     if report.get("timestamps"):
-        _header("⏱  Moments the audience reacted to")
+        _header("Moments the audience reacted to")
         for moment in report["timestamps"][:8]:
             print(f"   {moment['timestamp']:>8}  {moment['count']:>4} mentions · "
                   f"{moment['likes']:,} likes")
@@ -167,14 +181,12 @@ def print_video(report: dict) -> None:
                 print(f"             “{moment['examples'][0]['quote'][:120]}”")
 
     if report.get("products"):
-        _header("📦 Products mentioned")
+        _header("Products mentioned")
         for row in report["products"][:8]:
             print(f"   {row['product'][:30]:<30} {row['mentions']:>4} mentions · "
                   f"net {row['net_stance']:+.2f}")
 
-    _header("⚠️  Read this before quoting any number above")
-    for caveat in report["caveats"]:
-        print(_wrap(f"• {caveat}", indent="   "))
+    _print_caveats(report)
 
 
 # --------------------------------------------------------------------------
@@ -189,7 +201,7 @@ def cmd_study(args) -> int:
     if len(refs) == 1 and refs[0].strip().lower() == "demo":
         report = demo_study()
     else:
-        api_key, _ = _need_keys()
+        api_key = _need_key()
         preview = estimate_quota(len(refs), args.videos, args.comments)
         print(f"\nPlanned: {len(refs)} channels × {args.videos} videos × "
               f"{args.comments} comments = {preview['videos']} videos")
@@ -222,7 +234,7 @@ def cmd_video(args) -> int:
     if args.url.strip().lower() == "demo":
         report = demo_video_report()
     else:
-        api_key, _ = _need_keys()
+        api_key = _need_key()
         from app.analysis import analyze_video
 
         try:
@@ -242,7 +254,7 @@ def cmd_video(args) -> int:
 
 def cmd_estimate(args) -> int:
     result = estimate_quota(args.channels, args.videos, args.comments)
-    _header("📐 Quota estimate")
+    _header("Quota estimate")
     print(f"   {args.channels} channels × {args.videos} videos = {result['videos']} videos")
     print(f"   {args.comments} comments per video\n")
     for endpoint, calls in result["breakdown"].items():
@@ -257,7 +269,7 @@ def _write_outputs(args, report: dict, gap_rows: list[dict]) -> None:
     if getattr(args, "json", None):
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2, ensure_ascii=False)
-        print(f"\n💾 Full report written to {args.json}")
+        print(f"\nFull report written to {args.json}")
     if getattr(args, "csv", None) and gap_rows:
         fields = list(gap_rows[0].keys())
         with open(args.csv, "w", encoding="utf-8", newline="") as handle:
@@ -265,7 +277,7 @@ def _write_outputs(args, report: dict, gap_rows: list[dict]) -> None:
             writer.writeheader()
             for row in gap_rows:
                 writer.writerow({k: _flatten(v) for k, v in row.items() if k in fields})
-        print(f"💾 Table written to {args.csv}")
+        print(f"Table written to {args.csv}")
 
 
 def _flatten(value):
@@ -308,9 +320,7 @@ def main() -> int:
     est.set_defaults(func=cmd_estimate)
 
     args = parser.parse_args()
-    result = args.func(args)
-    print("\n🌐 Prefer a dashboard? Run:  uvicorn app.main:app  →  http://127.0.0.1:8000\n")
-    return result
+    return args.func(args)
 
 
 if __name__ == "__main__":
