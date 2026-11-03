@@ -11,7 +11,7 @@ Quota notes (units per call; the free tier allows 10,000 units/day):
 A channel's whole catalogue is reachable without ever calling search:
 channels.list returns the 'uploads' playlist ID, and playlistItems pages
 through it at 1 unit per 50 videos. That is what makes a multi-channel study
-affordable — a 12-channel, 96-video, ~48k-comment corpus costs ~495 units.
+affordable — a 12-channel, 96-video, ~48k-comment corpus costs ~506 units.
 """
 
 from __future__ import annotations
@@ -382,9 +382,13 @@ def fetch_comments(
 
 
 def estimate_quota(channels: int, videos_per_channel: int, comments_per_video: int) -> dict:
-    """Predict the quota cost of a study before spending any of it."""
+    """Predict the quota cost of a study before spending any of it.
+
+    Assumes every channel is given as an @handle, which costs one call each
+    (UC... IDs batch 50 to a call), so the estimate errs high rather than low.
+    """
     videos = channels * videos_per_channel
-    channel_calls = max(1, (channels + 49) // 50)
+    channel_calls = channels
     playlist_calls = channels * max(1, (videos_per_channel + 49) // 50)
     video_calls = max(1, (videos + 49) // 50) if videos else 0
     comment_calls = videos * max(1, (comments_per_video + 99) // 100)

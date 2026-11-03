@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from .niche import CAVEATS
 
 _CHANNELS = [
-    ("UC_demo_hoffmann", "The Coffee Bench", 1_240_000, 412),
-    ("UC_demo_lance", "Pull & Purge", 486_000, 233),
+    ("UC_demo_bench", "The Coffee Bench", 1_240_000, 412),
+    ("UC_demo_purge", "Pull & Purge", 486_000, 233),
     ("UC_demo_kitchen", "Small Kitchen Coffee", 193_000, 178),
     ("UC_demo_roast", "Roast Theory", 88_400, 96),
 ]
@@ -262,9 +262,9 @@ _THEMES = {
 
 _OVERLAP = {
     "nodes": [
-        {"channel_id": "UC_demo_hoffmann", "channel": "The Coffee Bench",
+        {"channel_id": "UC_demo_bench", "channel": "The Coffee Bench",
          "commenters": 1840, "exclusive": 1131, "exclusive_pct": 61.5},
-        {"channel_id": "UC_demo_lance", "channel": "Pull & Purge",
+        {"channel_id": "UC_demo_purge", "channel": "Pull & Purge",
          "commenters": 1120, "exclusive": 486, "exclusive_pct": 43.4},
         {"channel_id": "UC_demo_kitchen", "channel": "Small Kitchen Coffee",
          "commenters": 640, "exclusive": 402, "exclusive_pct": 62.8},
@@ -375,7 +375,7 @@ def demo_study() -> dict:
     return {
         "demo": True,
         "study": {
-            "label": "[DEMO] Home espresso — 4 channels",
+            "label": "Home espresso",
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "channels": [
                 {
@@ -403,28 +403,130 @@ def demo_study() -> dict:
         "products": _PRODUCTS,
         "trust": _TRUST,
         "drift": _DRIFT,
+        # 4 handles, 4 upload-playlist pages, 1 videos.list call for all 32
+        # videos, then 3 comment pages (300 comments) per video.
         "quota": {
-            "units": 495,
+            "units": 105,
             "calls": {
-                "channels.list": 1,
+                "channels.list": 4,
                 "playlistItems.list": 4,
                 "videos.list": 1,
-                "commentThreads.list": 489,
+                "commentThreads.list": 96,
             },
             "daily_free_tier": 10_000,
         },
+        # 192 map batches of 50 comments plus 6 clustering calls, priced the
+        # way UsageMeter prices them on the default model.
         "usage": {
             "requests": 198,
+            "failed_requests": 0,
             "input_tokens": 412_800,
             "output_tokens": 96_400,
             "cache_read_tokens": 301_200,
             "batched": False,
-            # What this corpus would actually cost on the default models.
-            "estimated_cost_usd": 4.47,
-            "models": {"claude-opus-5": {"input": 412_800, "output": 96_400}},
+            "estimated_cost_usd": 2.43,
+            "models": {"claude-opus-5-5": {"input": 412_800, "output": 96_400}},
         },
         "caveats": CAVEATS,
     }
+
+
+_VIDEO_TITLE = "Best Espresso Machines Under $1000"
+
+
+def _video_example(quote, author, likes):
+    return _example(quote, author, likes, "The Coffee Bench", _VIDEO_TITLE)
+
+
+# Themes for the single-video sample. Counts are on the scale of the 500
+# comments that report analyses, not the corpus-wide study above.
+_VIDEO_THEMES = {
+    "question": [
+        _theme(
+            "question", "Does the grinder matter more than the machine at this budget?",
+            "Asked repeatedly and never answered directly in the video.",
+            21, 4_102, 1,
+            {"2026-04": 15, "2026-05": 6, "_channels": [("The Coffee Bench", 21)]},
+            ["does the grinder matter more than the machine at this budget"],
+            [_video_example("everyone shows the machine, nobody shows the grind",
+                            "@bench_pressed", 4102)],
+        ),
+        _theme(
+            "question", "Which of these can actually be repaired at home?",
+            "Viewers want parts availability before they commit.",
+            12, 1_744, 1,
+            {"2026-04": 7, "2026-05": 5, "_channels": [("The Coffee Bench", 12)]},
+            ["which machines can be repaired at home"],
+            [_video_example("can I get gaskets for this in three years or is it landfill",
+                            "@fixitpull", 1744)],
+        ),
+        _theme(
+            "question", "Is the pressure gauge worth paying extra for?",
+            "Split opinions in the replies, no answer from the creator.",
+            9, 980, 1,
+            {"2026-04": 6, "2026-05": 3, "_channels": [("The Coffee Bench", 9)]},
+            ["is a pressure gauge worth paying extra for"],
+            [_video_example("does the gauge actually help or is it just jewellery",
+                            "@ninebar", 980)],
+        ),
+    ],
+    "request": [
+        _theme(
+            "request", "Grinder-first buying guidance", _GAPS[0]["description"],
+            41, 5_980, 1,
+            {"2026-04": 29, "2026-05": 12, "_channels": [("The Coffee Bench", 41)]},
+            ["buying guide should start from the grinder",
+             "grinder matters more than the machine at this budget"],
+            [_video_example(
+                "everyone shows the machine, nobody shows the grind. I wasted 900 "
+                "on a machine and my shots got better the day I changed grinder",
+                "@bench_pressed", 4102)],
+        ),
+    ],
+    "complaint": [
+        _theme(
+            "complaint", "Sponsored segment is not clearly marked",
+            "Viewers say the ad read blends into the review, and that it makes "
+            "them doubt the ranking that follows it.",
+            23, 3_310, 1,
+            {"2026-04": 17, "2026-05": 6, "_channels": [("The Coffee Bench", 23)]},
+            ["sponsored segment is not disclosed clearly",
+             "review reads like an ad without saying so"],
+            [_video_example(
+                "the 'honest review' has an affiliate link, a discount code and a "
+                "brand rep in the comments. call it an ad and I'll still watch",
+                "@flatwhitefred", 3310)],
+        ),
+    ],
+    "correction": [
+        _theme(
+            "correction", "The nine-bar rule is disputed",
+            "A small, well-liked group argues nine bars is a historical artefact "
+            "rather than an optimum, and objects to it being stated as fact.",
+            9, 2_890, 1,
+            {"2026-04": 6, "2026-05": 3, "_channels": [("The Coffee Bench", 9)]},
+            ["nine bars is a historical artefact not an optimum"],
+            [_video_example(
+                "9 bar is where the spring landed in 1961, it is not a law of physics. "
+                "6 bar tastes better on most of what I buy",
+                "@leverhead", 2890)],
+        ),
+    ],
+    "praise": [
+        _theme(
+            "praise", "Unedited real-time pulls",
+            "Viewers single out the uncut shots, failures included, as the most "
+            "useful part of the video.",
+            17, 4_420, 1,
+            {"2026-04": 12, "2026-05": 5, "_channels": [("The Coffee Bench", 17)]},
+            ["showing the unedited pull including the bad shots is valuable"],
+            [_video_example(
+                "the fact you left the choked shot in taught me more than the whole "
+                "rest of the video",
+                "@chokedshot", 4420)],
+        ),
+    ],
+}
 
 
 def demo_video_report() -> dict:
@@ -433,9 +535,9 @@ def demo_video_report() -> dict:
         "demo": True,
         "video": {
             "video_id": "demo0000000",
-            "title": "[DEMO] Best Espresso Machines Under $1000",
+            "title": _VIDEO_TITLE,
             "channel": "The Coffee Bench",
-            "channel_id": "UC_demo_hoffmann",
+            "channel_id": "UC_demo_bench",
             "published_at": "2026-04-02T10:00:00Z",
             "thumbnail": "",
             "view_count": 1_284_503,
@@ -454,48 +556,66 @@ def demo_video_report() -> dict:
                 "confusion": 27, "correction": 14, "praise": 25,
             },
         },
-        "themes": {
-            "request": [_THEMES["praise"][0] | {"kind": "request",
-                        "title": "Grinder-first buying guidance",
-                        "description": _GAPS[0]["description"],
-                        "count": 61, "likes": 5_980}],
-            "complaint": _THEMES["complaint"][:1],
-            "correction": _THEMES["correction"],
-            "praise": _THEMES["praise"],
-        },
+        "themes": _VIDEO_THEMES,
         "questions": [
             {"question": "Does the grinder matter more than the machine at this budget?",
              "detail": "Asked repeatedly and never answered directly in the video.",
-             "asked_by": 34, "likes": 4_102, "author": "@bench_pressed",
+             "asked_by": 21, "likes": 4_102, "author": "@bench_pressed",
              "example": "everyone shows the machine, nobody shows the grind"},
             {"question": "Which of these can actually be repaired at home?",
              "detail": "Viewers want parts availability before they commit.",
-             "asked_by": 19, "likes": 1_744, "author": "@fixitpull",
+             "asked_by": 12, "likes": 1_744, "author": "@fixitpull",
              "example": "can I get gaskets for this in three years or is it landfill"},
             {"question": "Is the pressure gauge worth paying extra for?",
              "detail": "Split opinions in the replies, no answer from the creator.",
-             "asked_by": 15, "likes": 980, "author": "@ninebar",
+             "asked_by": 9, "likes": 980, "author": "@ninebar",
              "example": "does the gauge actually help or is it just jewellery"},
         ],
         "timestamps": [
-            {"seconds": 624, "timestamp": "10:24", "count": 84, "likes": 6_240,
+            {"seconds": 624, "timestamp": "10:24", "count": 31, "likes": 6_240,
              "examples": [{"quote": "10:24 gave me actual goosebumps, that crema",
                            "author": "@chokedshot", "likes": 1_820}]},
-            {"seconds": 252, "timestamp": "4:12", "count": 51, "likes": 2_910,
+            {"seconds": 252, "timestamp": "4:12", "count": 19, "likes": 2_910,
              "examples": [{"quote": "4:12 is the only honest moment in any review this year",
                            "author": "@longpull", "likes": 1_100}]},
-            {"seconds": 1_086, "timestamp": "18:06", "count": 33, "likes": 1_450,
+            {"seconds": 1_086, "timestamp": "18:06", "count": 12, "likes": 1_450,
              "examples": [{"quote": "18:06 wait did the portafilter just drop",
                            "author": "@steamwand_sam", "likes": 620}]},
         ],
-        "products": _PRODUCTS[:3],
-        "vocabulary": _VOCABULARY[:10],
-        "trust": _TRUST[:1],
+        "products": [
+            {"product": "Niche Zero", "mentions": 38, "likes": 1_820, "recommends": 30,
+             "warns_against": 2, "compares": 5, "neutral": 1, "channel_spread": 1,
+             "top_channels": ["The Coffee Bench"], "net_stance": 0.875,
+             "examples": [{"quote": "the zero is the only upgrade that changed my shots",
+                           "likes": 1820, "channel": "The Coffee Bench"}]},
+            {"product": "Gaggia Classic", "mentions": 27, "likes": 1_460, "recommends": 16,
+             "warns_against": 6, "compares": 4, "neutral": 1, "channel_spread": 1,
+             "top_channels": ["The Coffee Bench"], "net_stance": 0.455,
+             "examples": [{"quote": "great machine if you accept you're buying a project",
+                           "likes": 1460, "channel": "The Coffee Bench"}]},
+            {"product": "Breville Bambino", "mentions": 22, "likes": 990, "recommends": 14,
+             "warns_against": 4, "compares": 3, "neutral": 1, "channel_spread": 1,
+             "top_channels": ["The Coffee Bench"], "net_stance": 0.556,
+             "examples": [{"quote": "best thing for a tiny kitchen, steam wand is the weak point",
+                           "likes": 990, "channel": "The Coffee Bench"}]},
+        ],
+        "vocabulary": [
+            {"term": "channeling", "count": 41}, {"term": "puck prep", "count": 33},
+            {"term": "wdt", "count": 29}, {"term": "sour shot", "count": 24},
+            {"term": "retention", "count": 21}, {"term": "dialling in", "count": 19},
+            {"term": "choked", "count": 17}, {"term": "gusher", "count": 12},
+            {"term": "naked portafilter", "count": 11}, {"term": "single dosing", "count": 9},
+        ],
+        "trust": [
+            {"channel": "The Coffee Bench", "purchase_intent": 46, "sponsorship_skepticism": 19,
+             "deference": 38, "expertise_challenge": 7, "total": 110, "trust_ratio": 0.764},
+        ],
         "quota": {"units": 6, "calls": {"videos.list": 1, "commentThreads.list": 5},
                   "daily_free_tier": 10_000},
-        "usage": {"requests": 11, "input_tokens": 24_100, "output_tokens": 6_200,
-                  "cache_read_tokens": 18_000, "batched": False,
-                  "estimated_cost_usd": 0.28,
-                  "models": {"claude-opus-5": {"input": 24_100, "output": 6_200}}},
+        # 10 map batches plus 6 clustering calls.
+        "usage": {"requests": 16, "failed_requests": 0, "input_tokens": 33_600,
+                  "output_tokens": 7_800, "cache_read_tokens": 22_400, "batched": False,
+                  "estimated_cost_usd": 0.21,
+                  "models": {"claude-opus-5-5": {"input": 33_600, "output": 7_800}}},
         "caveats": CAVEATS,
     }
