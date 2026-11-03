@@ -1,25 +1,45 @@
-/* YouTube Audience Research — frontend.
-   No external libraries: every chart is hand-rolled SVG/CSS so the page works
-   offline and renders identically in light and dark. */
+/* YouTube Audience Research - frontend.
+   No libraries: the charts are small hand-written SVG/CSS, coloured through CSS
+   variables so they follow the light/dark theme without re-rendering. */
 
 const $ = (id) => document.getElementById(id);
-const state = { mode: "study", report: null, source: null };
+const state = { mode: "study", source: null };
 
 const KINDS = ["request", "complaint", "question", "confusion", "correction", "praise"];
-const KIND_LABEL = {
+const KIND_GROUP = {
   request: "Requests", complaint: "Complaints", question: "Questions",
   confusion: "Confusion", correction: "Factual pushback", praise: "What worked",
+};
+const KIND_NAME = {
+  request: "Request", complaint: "Complaint", question: "Question",
+  confusion: "Confusion", correction: "Correction", praise: "Praise",
+};
+const STAGES = {
+  channels: "Resolving channels", comments: "Fetching comments",
+  extract: "Reading comments", themes: "Clustering themes",
 };
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const num = (v) => (Number(v) || 0).toLocaleString();
-const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const plural = (n, word) => `${num(n)} ${word}${n === 1 ? "" : "s"}`;
+const compact = (v) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 })
+  .format(Number(v) || 0);
+const signed = (v) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)}`;
+
+function monthLabel(month) {
+  const [year, m] = month.split("-").map(Number);
+  if (!year || !m) return month;
+  return new Date(Date.UTC(year, m - 1, 1))
+    .toLocaleString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+}
 
 /* ---------------- theme ---------------- */
 
-const savedTheme = localStorage.getItem("theme");
-if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+try {
+  const saved = localStorage.getItem("theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+} catch { /* storage unavailable: follow the system theme */ }
 
 $("themeToggle").addEventListener("click", () => {
   const isDark = document.documentElement.dataset.theme
@@ -27,8 +47,7 @@ $("themeToggle").addEventListener("click", () => {
     : matchMedia("(prefers-color-scheme: dark)").matches;
   const next = isDark ? "light" : "dark";
   document.documentElement.dataset.theme = next;
-  localStorage.setItem("theme", next);
-  if (state.report) render(state.report);   // re-draw SVGs against the new surface
+  try { localStorage.setItem("theme", next); } catch { /* not persisted */ }
 });
 
 /* ---------------- setup ---------------- */
@@ -47,18 +66,14 @@ document.querySelectorAll(".tab").forEach((tab) => {
 });
 
 fetch("/api/status").then((r) => r.json()).then((s) => {
-  const chip = $("keyStatus");
   const missing = [];
   if (!s.youtube_key_configured) missing.push("YouTube");
   if (!s.anthropic_key_configured) missing.push("Anthropic");
-  if (missing.length) {
-    chip.textContent = `${missing.join(" + ")} key missing — demo only`;
-    chip.className = "chip chip-warn";
-  } else {
-    chip.textContent = `ready · ${s.map_model}${s.batch_api ? " · batch" : ""}`;
-    chip.className = "chip chip-ok";
-  }
-}).catch(() => { $("keyStatus").textContent = "status unavailable"; });
+  const models = s.map_model === s.reduce_model ? s.map_model : `${s.map_model} / ${s.reduce_model}`;
+  $("keyStatus").textContent = missing.length
+    ? `No ${missing.join(" or ")} key set, demo only`
+    : `${models}${s.batch_api ? ", batched" : ""}`;
+}).catch(() => { $("keyStatus").textContent = ""; });
 
 async function updateEstimate() {
   const refs = $("channels").value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
@@ -71,10 +86,14 @@ async function updateEstimate() {
     comments_per_video: $("commentsPer").value,
   });
   try {
-    const est = await (await fetch(`/api/estimate?${params}`)).json();
-    box.innerHTML = `Plan: <b>${est.videos}</b> videos · about <b>${num(est.estimated_units)}</b>
-      of ${num(est.daily_free_tier)} daily quota units
-      — roughly <b>${est.studies_per_day}</b> studies/day on the free tier.`;
+    const response = await fetch(`/api/estimate?${params}`);
+    if (!response.ok) { box.textContent = ""; return; }
+    const est = await response.json();
+    const perDay = est.studies_per_day >= 1
+      ? `about ${est.studies_per_day} studies like this a day on the free tier`
+      : "more than the free tier allows in a day";
+    box.textContent = `Uses up to ${num(est.estimated_units)} of ${num(est.daily_free_tier)} daily `
+      + `YouTube quota units, ${perDay}.`;
   } catch { box.textContent = ""; }
 }
 ["channels", "videosPer", "commentsPer"].forEach((id) =>
@@ -124,13 +143,11 @@ $("runForm").addEventListener("submit", (event) => {
     const event = JSON.parse(message.data);
     if (event.type === "progress") {
       const pct = event.total ? Math.round((event.done / event.total) * 100) : 0;
-      const stage = { channels: "Resolving channels", comments: "Fetching comments",
-                      extract: "Extracting themes" }[event.stage] || event.stage;
       $("progressFill").style.width = `${Math.max(2, pct)}%`;
-      $("progressLabel").textContent = `${stage} — ${event.done} of ${event.total}`;
+      $("progressLabel").textContent =
+        `${STAGES[event.stage] || event.stage}: ${event.done} of ${event.total}`;
     } else if (event.type === "done") {
       source.close(); state.source = null;
-      $("progressFill").style.width = "100%";
       $("progress").hidden = true;
       $("runBtn").disabled = false;
       render(event.report);
@@ -158,7 +175,7 @@ const tip = $("tooltip");
 document.addEventListener("mouseover", (event) => {
   const target = event.target.closest("[data-tip]");
   if (!target) return;
-  tip.innerHTML = target.dataset.tip;
+  tip.innerHTML = target.dataset.tip;   // built from escaped values below
   tip.hidden = false;
 });
 document.addEventListener("mousemove", (event) => {
@@ -175,188 +192,180 @@ document.addEventListener("mouseout", (event) => {
 
 /* ---------------- chart primitives ---------------- */
 
-/** Horizontal magnitude bar. Rounded data-end, square against the baseline. */
-function bar(value, max, color, tipText) {
-  const pct = max > 0 ? Math.max(1.5, (value / max) * 100) : 0;
-  return `<div class="barwrap" data-tip="${esc(tipText)}" style="background:var(--gridline);
-    height:9px;border-radius:0 4px 4px 0;overflow:hidden">
-    <div style="width:${pct}%;height:100%;background:${color};border-radius:0 4px 4px 0"></div></div>`;
+/** One horizontal bar: square at the baseline, rounded at the data end. */
+function bar(value, max, tipHtml) {
+  const pct = max > 0 ? Math.max(1, (value / max) * 100) : 0;
+  return `<div class="bar" data-tip="${esc(tipHtml)}"><span class="bar-fill" style="width:${pct}%"></span></div>`;
 }
 
-/** Diverging bar around a neutral midpoint: negative left, positive right. */
-function divergingBar(value, tipText) {
-  const half = Math.min(50, Math.abs(value) * 50);
-  const positive = value >= 0;
-  return `<div data-tip="${esc(tipText)}" style="position:relative;height:9px;
-      background:var(--div-mid);border-radius:4px">
-    <div style="position:absolute;top:0;bottom:0;${positive ? "left:50%" : `right:50%`};
-      width:${half}%;background:${positive ? "var(--div-pos)" : "var(--div-neg)"};
-      border-radius:${positive ? "0 4px 4px 0" : "4px 0 0 4px"}"></div>
-    <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;
-      background:var(--baseline)"></div></div>`;
+/** Stacked bar. Segments are [{value, cls}]; total length is relative to `max`. */
+function stackedBar(segments, max, tipHtml) {
+  const total = segments.reduce((sum, s) => sum + s.value, 0);
+  const width = max > 0 ? Math.max(1, (total / max) * 100) : 0;
+  const parts = segments.filter((s) => s.value > 0)
+    .map((s) => `<span class="${s.cls}" style="flex:${s.value} 1 0"></span>`).join("");
+  return `<div class="bar" data-tip="${esc(tipHtml)}" style="width:${width}%">${parts}</div>`;
 }
 
-/** Two-segment stacked bar with the required 2px surface gap between fills. */
-function stackedBar(left, right, leftColor, rightColor, tipText) {
-  const total = left + right || 1;
-  return `<div data-tip="${esc(tipText)}" style="display:flex;gap:2px;height:9px">
-    <div style="flex:${left / total};background:${leftColor};border-radius:4px 0 0 4px"></div>
-    <div style="flex:${right / total};background:${rightColor};border-radius:0 4px 4px 0"></div></div>`;
+const barRow = (label, chart, value) => `<div class="bar-row">
+  <div class="bar-label">${label}</div><div class="bar-track">${chart}</div>
+  <div class="bar-value">${value}</div></div>`;
+
+const barHead = (left, right) => `<div class="bar-row bar-head">
+  <div class="bar-label label">${esc(left)}</div><div></div>
+  <div class="bar-value label">${esc(right)}</div></div>`;
+
+const legend = (items) => `<div class="legend">${items.map(([cls, text]) =>
+  `<span><i class="swatch" style="background:var(${cls})"></i>${esc(text)}</span>`).join("")}</div>`;
+
+/** Column path with rounded top corners and a square base. */
+function columnPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}`
+    + `Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
 }
 
-/** Small-multiple column chart for a month->count series. */
+/** Small column chart for a month -> count series. */
 function monthChart(months) {
   const entries = Object.entries(months);
   if (!entries.length) return "";
-  const width = 230, height = 68, pad = 16;
+  const width = 240, height = 76, axis = 20, plot = height - axis;
   const max = Math.max(...entries.map(([, v]) => v));
-  const step = (width - pad) / entries.length;
-  const barWidth = Math.max(4, step - 4);
+  const step = width / entries.length;
+  const colWidth = Math.min(24, step - 6);
 
-  const bars = entries.map(([month, value], index) => {
-    const h = max > 0 ? Math.max(2, (value / max) * (height - pad)) : 2;
-    const x = index * step + 2;
-    const y = height - pad - h;
-    return `<rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="4" ry="4"
-      fill="var(--mark)" data-tip="<b>${esc(month)}</b><br>${num(value)} comments"></rect>`;
+  const cols = entries.map(([month, value], i) => {
+    const h = max > 0 ? Math.max(2, (value / max) * (plot - 4)) : 2;
+    const x = i * step + (step - colWidth) / 2;
+    return `<path d="${columnPath(x, plot - h, colWidth, h, 4)}" style="fill:var(--accent)"
+      data-tip="${esc(`<b>${esc(monthLabel(month))}</b><br>${num(value)} comments`)}"/>`;
   }).join("");
 
-  const labels = entries.map(([month], index) =>
-    (index === 0 || index === entries.length - 1)
-      ? `<text x="${index * step + barWidth / 2 + 2}" y="${height - 3}" font-size="9"
-           fill="var(--text-muted)" text-anchor="middle">${esc(month.slice(2))}</text>`
-      : "").join("");
+  const first = (step - colWidth) / 2;
+  const last = (entries.length - 1) * step + (step + colWidth) / 2;
+  const axisLabel = (x, anchor, month) => `<text x="${x}" y="${height - 4}" font-size="11"
+    style="fill:var(--muted)" text-anchor="${anchor}">${esc(monthLabel(month))}</text>`;
 
-  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img"
-    aria-label="Monthly volume">
-    <line x1="0" y1="${height - pad}" x2="${width}" y2="${height - pad}"
-      stroke="var(--baseline)" stroke-width="1"/>${bars}${labels}</svg>`;
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="Comments per month">
+    <line x1="0" y1="${plot}" x2="${width}" y2="${plot}" style="stroke:var(--baseline)" stroke-width="1"/>
+    ${cols}${axisLabel(first, "start", entries[0][0])}
+    ${entries.length > 1 ? axisLabel(last, "end", entries[entries.length - 1][0]) : ""}</svg>`;
 }
 
-/** Circular node-link graph. Identity comes from direct labels, not hue — that
-    keeps it clear of the all-pairs categorical cap. */
+/** Channels on a circle; circle size is commenters, line width is shared commenters. */
 function overlapGraph(nodes, edges) {
   if (nodes.length < 2) return "";
-  const size = 460, cx = size / 2, cy = size / 2, radius = size / 2 - 96;
+  const size = 460, cx = size / 2, cy = size / 2, radius = size / 2 - 100;
   const maxCommenters = Math.max(...nodes.map((n) => n.commenters));
   const maxShared = Math.max(...edges.map((e) => e.shared), 1);
 
   const points = nodes.map((node, index) => {
     const angle = (index / nodes.length) * Math.PI * 2 - Math.PI / 2;
-    return { ...node, x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius, angle };
+    const r = 6 + (node.commenters / maxCommenters) * 12;
+    return { ...node, x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius, angle, r };
   });
+  // Crop the square canvas to the nodes and their two label lines.
+  const top = Math.min(...points.map((p) => p.y - p.r)) - 8;
+  const bottom = Math.max(...points.map((p) => p.y + Math.max(p.r, 24))) + 8;
   const byName = Object.fromEntries(points.map((p) => [p.channel, p]));
 
   const links = edges.map((edge) => {
     const a = byName[edge.source], b = byName[edge.target];
     if (!a || !b) return "";
-    const width = 1 + (edge.shared / maxShared) * 9;
+    const width = 1 + (edge.shared / maxShared) * 8;
+    const tipHtml = `<b>${esc(edge.source)} and ${esc(edge.target)}</b><br>`
+      + `${num(edge.shared)} shared commenters<br>Jaccard ${edge.jaccard}`;
     return `<path d="M${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}" fill="none"
-      stroke="var(--mark)" stroke-opacity="0.45" stroke-width="${width.toFixed(1)}"
-      stroke-linecap="round"
-      data-tip="<b>${esc(edge.source)} ↔ ${esc(edge.target)}</b><br>
-        ${num(edge.shared)} shared commenters<br>Jaccard ${edge.jaccard}<br>
-        ${edge.pct_of_source}% of ${esc(edge.source)}, ${edge.pct_of_target}% of ${esc(edge.target)}"/>`;
+      style="stroke:var(--accent)" stroke-opacity="0.4" stroke-width="${width.toFixed(1)}"
+      stroke-linecap="round" data-tip="${esc(tipHtml)}"/>`;
   }).join("");
 
   const dots = points.map((point) => {
-    const r = 8 + (point.commenters / maxCommenters) * 14;
+    const r = point.r;
     const right = Math.cos(point.angle) > -0.1;
+    const lx = point.x + (right ? r + 8 : -r - 8);
+    const anchor = right ? "start" : "end";
+    const tipHtml = `<b>${esc(point.channel)}</b><br>${num(point.commenters)} commenters, `
+      + `${point.exclusive_pct}% only here`;
     return `<g>
-      <circle cx="${point.x}" cy="${point.y}" r="${r}" fill="var(--mark)"
-        stroke="var(--surface-1)" stroke-width="2"
-        data-tip="<b>${esc(point.channel)}</b><br>${num(point.commenters)} commenters<br>
-          ${point.exclusive_pct}% exclusive to this channel"/>
-      <text x="${point.x + (right ? r + 6 : -r - 6)}" y="${point.y + 4}" font-size="11"
-        fill="var(--text-primary)" text-anchor="${right ? "start" : "end"}">${esc(point.channel)}</text>
-      <text x="${point.x + (right ? r + 6 : -r - 6)}" y="${point.y + 17}" font-size="9.5"
-        fill="var(--text-muted)" text-anchor="${right ? "start" : "end"}">${point.exclusive_pct}% exclusive</text>
+      <circle cx="${point.x}" cy="${point.y}" r="${r}" style="fill:var(--accent);stroke:var(--page)"
+        stroke-width="2" data-tip="${esc(tipHtml)}"/>
+      <text x="${lx}" y="${point.y + 4}" font-size="13" style="fill:var(--text)"
+        text-anchor="${anchor}">${esc(point.channel)}</text>
+      <text x="${lx}" y="${point.y + 20}" font-size="12" style="fill:var(--muted)"
+        text-anchor="${anchor}">${point.exclusive_pct}% only here</text>
     </g>`;
   }).join("");
 
-  return `<svg viewBox="0 0 ${size} ${size}" width="100%" style="max-width:${size}px;margin:0 auto"
-    role="img" aria-label="Audience overlap between channels">${links}${dots}</svg>`;
+  return `<svg class="overlap-graph" viewBox="0 ${top} ${size} ${bottom - top}" width="100%" role="img"
+    aria-label="Audience overlap between channels">${links}${dots}</svg>`;
 }
 
 /* ---------------- sections ---------------- */
 
-const card = (title, note, body) => `<section class="card">
-  <h2>${esc(title)}${note ? `<span class="note">${esc(note)}</span>` : ""}</h2>
-  <div class="card-body">${body}</div></section>`;
+const section = (title, body) => `<section class="section"><h2>${esc(title)}</h2>${body}</section>`;
 
-function tiles(pairs) {
-  return `<div class="tiles">${pairs.map(([k, v]) =>
-    `<div class="tile"><span class="v">${v}</span><span class="k">${esc(k)}</span></div>`).join("")}</div>`;
-}
+const stats = (pairs) => `<dl class="stats">${pairs.map(([label, value]) =>
+  `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`).join("")}</dl>`;
 
 function quoteBlock(example) {
   if (!example || !example.quote) return "";
-  const meta = [example.author, example.channel, `${num(example.likes)} likes`]
-    .filter(Boolean).join(" · ");
-  return `<blockquote class="quote">“${esc(example.quote)}”<cite>${esc(meta)}</cite></blockquote>`;
+  const source = [example.author, example.channel, example.likes ? plural(example.likes, "like") : ""]
+    .filter(Boolean).join(", ");
+  return `<blockquote class="quote">“${esc(example.quote)}”<cite>${esc(source)}</cite></blockquote>`;
+}
+
+function coverageText(gap) {
+  if (gap.coverage === "none" || !gap.closest_video) return "no existing video";
+  const title = `“${esc(gap.closest_video.title)}”`;
+  return gap.coverage === "covered" ? `covered by ${title}` : `partly covered by ${title}`;
 }
 
 function gapsSection(gaps) {
   if (!gaps?.length) return "";
-  const max = Math.max(...gaps.map((g) => g.gap_score));
-  const body = gaps.map((gap, index) => `
-    <article class="gap">
-      <div class="gap-head">
-        <span class="gap-rank">${index + 1}</span>
-        <span class="kind" data-k="${esc(gap.kind)}">${esc(gap.kind)}</span>
-        <span class="gap-title">${esc(gap.title)}</span>
-        <span class="coverage" data-c="${esc(gap.coverage)}">${
-          gap.coverage === "none" ? "unserved" : gap.coverage}</span>
+  const items = gaps.map((gap, index) => `
+    <li class="gap">
+      <span class="gap-rank">${index + 1}</span>
+      <div>
+        <h3>${esc(gap.title)}</h3>
+        <p class="gap-meta">${esc(KIND_NAME[gap.kind] || gap.kind)} · ${plural(gap.count, "comment")}
+          · ${plural(gap.likes, "like")} · ${plural(gap.channel_spread, "channel")} · ${coverageText(gap)}</p>
+        <p class="gap-desc">${esc(gap.description)}</p>
+        ${quoteBlock(gap.examples?.[0])}
       </div>
-      <p class="gap-desc">${esc(gap.description)}</p>
-      ${bar(gap.gap_score, max, "var(--mark)",
-        `<b>Gap score ${gap.gap_score}</b><br>demand weighted by how unmet it is`)}
-      <div class="gap-meta" style="margin-top:8px">
-        <span>${num(gap.count)} comments</span>
-        <span>${num(gap.likes)} likes</span>
-        <span>${gap.channel_spread} channel${gap.channel_spread === 1 ? "" : "s"}</span>
-        ${gap.closest_video ? `<span>closest: “${esc(gap.closest_video.title)}”</span>` : ""}
-      </div>
-      ${quoteBlock(gap.examples?.[0])}
-    </article>`).join("");
-  return card("Content gaps", "demand ranked by how poorly the published catalogue covers it", body);
+    </li>`).join("");
+  return section("Content gaps", `<ol class="gaps">${items}</ol>`);
 }
 
 function risingSection(rising) {
   if (!rising?.length) return "";
-  const body = `<div class="rows">${rising.map((row) => `
-    <div class="rowitem">
-      <span class="nm"><span class="kind" data-k="${esc(row.kind)}">${esc(row.kind)}</span>
-        ${esc(row.title)}</span>
-      ${bar(row.lift, Math.max(...rising.map((r) => r.lift)), "var(--mark)",
-        `<b>${row.lift}× over baseline</b><br>${row.recent} of ${row.total} in the last 90 days`)}
-      <span class="val">${row.lift}× · ${row.recent}/${row.total}</span>
-    </div>`).join("")}</div>`;
-  return card("Rising", "accelerating faster than the corpus as a whole", body);
+  const max = Math.max(...rising.map((r) => r.lift));
+  const rows = rising.map((row) => barRow(
+    `${esc(row.title)}<span class="desc">${esc(KIND_NAME[row.kind] || row.kind)} · ${num(row.recent)} of
+      ${num(row.total)} comments in the last 90 days</span>`,
+    bar(row.lift, max, `<b>${row.lift}× the corpus rate</b>`),
+    `${row.lift.toFixed(1)}×`,
+  )).join("");
+  return section("Rising", `<div class="bars">${barHead("Theme", "Lift")}${rows}</div>
+    <p class="note">Lift compares a theme's share of comments from the last 90 days with the
+      share for the corpus as a whole.</p>`);
 }
 
 function themesSection(themes) {
   const present = KINDS.filter((kind) => themes?.[kind]?.length);
   if (!present.length) return "";
-  const legend = `<div class="legend">${present.map((kind) =>
-    `<span><i class="swatch" style="background:var(--series-${KINDS.indexOf(kind) + 1})"></i>
-      ${esc(KIND_LABEL[kind])}</span>`).join("")}</div>`;
-
-  const body = present.map((kind) => {
-    const list = themes[kind].slice(0, 6);
-    const max = Math.max(...list.map((t) => t.count));
-    return `<h3 style="font-size:.86rem;margin:16px 0 8px;font-weight:600">
-        ${esc(KIND_LABEL[kind])}</h3>
-      <div class="rows">${list.map((theme) => `
-        <div class="rowitem">
-          <span class="nm" title="${esc(theme.description)}">${esc(theme.title)}</span>
-          ${bar(theme.count, max, `var(--series-${KINDS.indexOf(kind) + 1})`,
-            `<b>${esc(theme.title)}</b><br>${esc(theme.description)}<br>
-             ${num(theme.count)} comments · ${num(theme.likes)} likes`)}
-          <span class="val">${num(theme.count)}</span>
-        </div>`).join("")}</div>`;
+  // One scale for every group, since they share the comments column.
+  const max = Math.max(...present.flatMap((kind) => themes[kind].slice(0, 6).map((t) => t.count)));
+  const groups = present.map((kind) => {
+    const rows = themes[kind].slice(0, 6).map((theme) => barRow(
+      `${esc(theme.title)}<span class="desc">${esc(theme.description)}</span>`,
+      bar(theme.count, max, `<b>${esc(theme.title)}</b><br>${plural(theme.count, "comment")}, `
+        + `${plural(theme.likes, "like")}, ${plural(theme.channel_spread, "channel")}`),
+      num(theme.count),
+    )).join("");
+    return `<h3 class="subhead">${esc(KIND_GROUP[kind])}</h3><div class="bars">${rows}</div>`;
   }).join("");
-  return card("Themes", "clustered from deduplicated statements", legend + body);
+  return section("Themes", `<div class="bars">${barHead("Theme", "Comments")}</div>${groups}`);
 }
 
 function overlapSection(overlap) {
@@ -365,57 +374,56 @@ function overlapSection(overlap) {
     <thead><tr><th>Channel A</th><th>Channel B</th><th class="num">Shared</th>
       <th class="num">Jaccard</th><th class="num">% of A</th><th class="num">% of B</th></tr></thead>
     <tbody>${overlap.edges.map((e) => `<tr><td>${esc(e.source)}</td><td>${esc(e.target)}</td>
-      <td class="num">${num(e.shared)}</td><td class="num">${e.jaccard}</td>
+      <td class="num">${num(e.shared)}</td><td class="num">${e.jaccard.toFixed(3)}</td>
       <td class="num">${e.pct_of_source}%</td><td class="num">${e.pct_of_target}%</td></tr>`).join("")}
     </tbody></table></div>`;
-  return card("Audience overlap", overlap.note,
-    overlapGraph(overlap.nodes, overlap.edges) +
-    `<p style="font-size:.8rem;color:var(--text-muted);margin:10px 0 14px;text-align:center">
-      Node size is commenters sampled; link thickness is shared commenters.</p>` + table);
+  const graph = overlapGraph(overlap.nodes, overlap.edges);
+  const figure = graph ? `<figure class="overlap-figure">${graph}
+    <figcaption class="note">Circle size is commenters sampled; line width is commenters
+      the two channels share.</figcaption></figure>` : "";
+  return section("Audience overlap", `${figure}${table}<p class="note">${esc(overlap.note)}</p>`);
 }
 
 function productsSection(products) {
   if (!products?.length) return "";
-  const legend = `<div class="legend">
-    <span><i class="swatch" style="background:var(--div-pos)"></i>Recommends</span>
-    <span><i class="swatch" style="background:var(--div-neg)"></i>Warns against</span></div>`;
   const max = Math.max(...products.map((p) => p.mentions));
-  const body = `<div class="rows">${products.map((product) => `
-    <div class="rowitem">
-      <span class="nm">${esc(product.product)}</span>
-      <div style="display:grid;gap:5px">
-        ${bar(product.mentions, max, "var(--mark)",
-          `<b>${esc(product.product)}</b><br>${num(product.mentions)} mentions ·
-           ${product.channel_spread} channels`)}
-        ${divergingBar(product.net_stance,
-          `<b>Net stance ${product.net_stance >= 0 ? "+" : ""}${product.net_stance}</b><br>
-           ${product.recommends} recommend · ${product.warns_against} warn against`)}
-      </div>
-      <span class="val">${num(product.mentions)}<br>
-        <small style="color:var(--text-muted)">${product.net_stance >= 0 ? "+" : ""}${product.net_stance}</small></span>
-    </div>`).join("")}</div>`;
-  return card("Products by share of voice", "counted from the audience's words, not the script",
-    legend + body);
+  const rows = products.map((p) => {
+    const other = Math.max(0, p.mentions - p.recommends - p.warns_against);
+    const tipHtml = `<b>${esc(p.product)}</b><br>${num(p.recommends)} recommend, `
+      + `${num(p.warns_against)} warn against, ${num(other)} neutral or comparing`;
+    return barRow(
+      `${esc(p.product)}<span class="desc">net ${signed(p.net_stance)} ·
+        ${plural(p.channel_spread, "channel")}</span>`,
+      stackedBar([
+        { value: p.recommends, cls: "pos" },
+        { value: other, cls: "mid" },
+        { value: p.warns_against, cls: "neg" },
+      ], max, tipHtml),
+      num(p.mentions),
+    );
+  }).join("");
+  return section("Products", legend([
+    ["--pos", "Recommends"], ["--neutral-mark", "Neutral or comparing"], ["--neg", "Warns against"],
+  ]) + `<div class="bars">${barHead("Product", "Mentions")}${rows}</div>`);
 }
 
 function trustSection(trust) {
   if (!trust?.length) return "";
-  const legend = `<div class="legend">
-    <span><i class="swatch" style="background:var(--div-pos)"></i>Purchase intent + deference</span>
-    <span><i class="swatch" style="background:var(--div-neg)"></i>Sponsorship doubt + expertise challenge</span></div>`;
-  const body = `<div class="rows">${trust.map((row) => {
+  const rows = trust.map((row) => {
     const credible = row.purchase_intent + row.deference;
     const doubtful = row.sponsorship_skepticism + row.expertise_challenge;
-    return `<div class="rowitem">
-      <span class="nm">${esc(row.channel)}</span>
-      ${stackedBar(credible, doubtful, "var(--div-pos)", "var(--div-neg)",
-        `<b>${esc(row.channel)}</b><br>${row.purchase_intent} purchase intent ·
-         ${row.deference} deference<br>${row.sponsorship_skepticism} sponsorship doubt ·
-         ${row.expertise_challenge} expertise challenge`)}
-      <span class="val">${row.trust_ratio}</span>
-    </div>`;
-  }).join("")}</div>`;
-  return card("Trust signals by channel", "the influencer-vetting view — not polarity", legend + body);
+    const tipHtml = `<b>${esc(row.channel)}</b><br>${num(row.purchase_intent)} purchase intent, `
+      + `${num(row.deference)} deference<br>${num(row.sponsorship_skepticism)} sponsorship doubt, `
+      + `${num(row.expertise_challenge)} expertise challenge`;
+    return barRow(
+      `${esc(row.channel)}<span class="desc">${plural(row.total, "signal")}</span>`,
+      stackedBar([{ value: credible, cls: "pos" }, { value: doubtful, cls: "neg" }], credible + doubtful, tipHtml),
+      `${Math.round(row.trust_ratio * 100)}%`,
+    );
+  }).join("");
+  return section("Trust signals", legend([
+    ["--pos", "Purchase intent, deference"], ["--neg", "Sponsorship doubt, expertise challenge"],
+  ]) + `<div class="bars">${barHead("Channel", "Trusting")}${rows}</div>`);
 }
 
 function driftSection(drift) {
@@ -423,31 +431,29 @@ function driftSection(drift) {
   const body = `<div class="smalls">${drift.map((row) => `
     <div class="small">
       <h3>${esc(row.title)}</h3>
-      <p class="cap">${esc(row.kind)}</p>
+      <p class="muted">${esc(KIND_NAME[row.kind] || row.kind)}</p>
       ${monthChart(row.months)}
     </div>`).join("")}</div>`;
-  return card("Theme drift", "monthly comment volume per theme", body);
+  return section("Theme drift", body);
 }
 
 function vocabSection(vocabulary) {
   if (!vocabulary?.length) return "";
-  const body = `<div class="tags">${vocabulary.map((row) =>
-    `<span class="tag">${esc(row.term)} <b>${num(row.count)}</b></span>`).join("")}</div>`;
-  return card("Audience vocabulary", "creator and title vocabulary subtracted out", body);
+  return section("Audience vocabulary", `<ul class="vocab">${vocabulary.map((row) =>
+    `<li><span>${esc(row.term)}</span><b>${num(row.count)}</b></li>`).join("")}</ul>`);
 }
 
 function timestampsSection(moments) {
   if (!moments?.length) return "";
   const max = Math.max(...moments.map((m) => m.count));
-  const body = `<div class="rows">${moments.map((moment) => `
-    <div class="rowitem">
-      <span class="nm" style="font-variant-numeric:tabular-nums">${esc(moment.timestamp)}</span>
-      ${bar(moment.count, max, "var(--mark)",
-        `<b>${esc(moment.timestamp)}</b><br>${num(moment.count)} mentions ·
-         ${num(moment.likes)} likes<br>${esc(moment.examples?.[0]?.quote || "")}`)}
-      <span class="val">${num(moment.count)} mentions</span>
-    </div>`).join("")}</div>`;
-  return card("Moments the audience reacted to", "parsed from timestamps in the comments", body);
+  const rows = moments.map((moment) => barRow(
+    `<span style="font-variant-numeric:tabular-nums">${esc(moment.timestamp)}</span>
+      ${moment.examples?.[0] ? `<span class="desc">“${esc(moment.examples[0].quote)}”</span>` : ""}`,
+    bar(moment.count, max, `<b>${esc(moment.timestamp)}</b><br>${plural(moment.count, "mention")}, `
+      + `${plural(moment.likes, "like")}`),
+    num(moment.count),
+  )).join("");
+  return section("Moments people reacted to", `<div class="bars">${barHead("Timestamp", "Mentions")}${rows}</div>`);
 }
 
 function questionsSection(questions) {
@@ -455,62 +461,63 @@ function questionsSection(questions) {
   const body = `<div class="scroll-x"><table class="data">
     <thead><tr><th>Question</th><th class="num">Asked by</th><th class="num">Likes</th></tr></thead>
     <tbody>${questions.map((row) => `<tr>
-      <td><strong>${esc(row.question)}</strong>
-        ${row.example ? `<div style="color:var(--text-muted);font-size:.82rem">
-          “${esc(row.example)}”</div>` : ""}</td>
+      <td>${esc(row.question)}${row.example ? `<span class="sub">“${esc(row.example)}”</span>` : ""}</td>
       <td class="num">${num(row.asked_by)}</td><td class="num">${num(row.likes)}</td>
     </tr>`).join("")}</tbody></table></div>`;
-  return card("Top unanswered questions", "the cheapest reply a creator can make", body);
+  return section("Unanswered questions", body);
 }
 
-function footerSection(report) {
-  const id = report._id || "";
+function closingSections(report) {
+  const id = encodeURIComponent(report._id || "");
   const quota = report.quota || {}, usage = report.usage || {};
-  const isStudy = !!report.study;
-  const exports = isStudy
-    ? [["Content gaps CSV", `gaps.csv`], ["Themes CSV", `themes.csv`], ["Overlap CSV", `overlap.csv`]]
-    : [["Themes CSV", `themes.csv`]];
+  const files = report.study
+    ? [["Content gaps", "gaps.csv"], ["Themes", "themes.csv"], ["Audience overlap", "overlap.csv"]]
+    : [["Themes", "themes.csv"]];
+  const links = files.map(([label, file]) =>
+    `<a href="/api/export/${id}/${file}" download>${label} (CSV)</a>`).join("")
+    + `<a href="/api/export/${id}.json" download>Full report (JSON)</a>`;
 
-  const links = exports.map(([label, file]) =>
-    `<a class="btn" href="/api/export/${encodeURIComponent(id)}/${file}" download>${label}</a>`).join("")
-    + `<a class="btn" href="/api/export/${encodeURIComponent(id)}.json" download>Full JSON</a>`;
+  const cost = [
+    `${num(quota.units)} YouTube quota units`,
+    plural(usage.requests || 0, "model request"),
+    usage.estimated_cost_usd ? `about $${Number(usage.estimated_cost_usd).toFixed(2)} in model usage` : "",
+    usage.batched ? "map pass batched" : "",
+    usage.failed_requests ? `${plural(usage.failed_requests, "request")} skipped` : "",
+  ].filter(Boolean).join(" · ");
 
-  const cost = usage.estimated_cost_usd
-    ? `~$${Number(usage.estimated_cost_usd).toFixed(2)}` : "—";
-
-  return card("Cost, exports and caveats", "", `
-    ${tiles([
-      ["YouTube quota units", num(quota.units)],
-      ["Model requests", num(usage.requests)],
-      ["Estimated model cost", cost],
-      ["Batched", usage.batched ? "yes" : "no"],
-    ])}
-    <div class="exports" style="margin:18px 0">${links}</div>
-    <ul class="caveats">${(report.caveats || []).map((c) => `<li>${esc(c)}</li>`).join("")}</ul>`);
+  return section("Cost and downloads", `<p>${cost}</p><p class="downloads">${links}</p>`)
+    + section("Caveats", `<ul class="caveats">${(report.caveats || [])
+      .map((c) => `<li>${esc(c)}</li>`).join("")}</ul>`);
 }
 
 /* ---------------- render ---------------- */
 
 function render(report) {
-  state.report = report;
   const box = $("report");
+  const sample = report.demo ? `<span class="tag">Sample data</span>` : "";
 
   if (report.study) {
     const study = report.study;
-    box.innerHTML =
-      card(study.label, report.demo ? "pre-computed sample data" : "", `
-        ${tiles([
+    // "The Coffee Bench (1.2M subscribers), Pull & Purge (486K), ..."
+    let unit = " subscribers";
+    const channels = study.channels.map((c) => {
+      if (!c.subscribers) return esc(c.title);
+      const count = `${compact(c.subscribers)}${unit}`;
+      unit = "";
+      return `${esc(c.title)} <span class="muted">(${count})</span>`;
+    }).join(", ");
+    box.innerHTML = `<header class="report-head">
+        <h1>${esc(study.label)}</h1>
+        <p class="report-meta">${sample}${channels}</p>
+        ${stats([
           ["Channels", num(study.channels.length)],
-          ["Videos sampled", num(study.videos_sampled)],
-          ["Comments sampled", num(study.comments_sampled)],
+          ["Videos", num(study.videos_sampled)],
+          ["Comments", num(study.comments_sampled)],
           ["Items extracted", num(study.items_extracted)],
           ["Distinct statements", num(study.distinct_statements)],
-          ["Spam filtered", num(study.spam_filtered)],
+          ["Spam removed", num(study.spam_filtered)],
         ])}
-        <div class="tags" style="margin-top:16px">${study.channels.map((channel) =>
-          `<span class="tag">${esc(channel.title)}
-            <b>${channel.subscribers ? num(channel.subscribers) + " subs" : ""}</b></span>`).join("")}
-        </div>`)
+      </header>`
       + gapsSection(report.content_gaps)
       + risingSection(report.rising)
       + themesSection(report.themes)
@@ -519,26 +526,31 @@ function render(report) {
       + trustSection(report.trust)
       + driftSection(report.drift)
       + vocabSection(report.vocabulary)
-      + footerSection(report);
+      + closingSections(report);
   } else {
     const video = report.video, summary = report.summary;
-    box.innerHTML =
-      card(video.title, video.channel, `
-        ${tiles([
-          ["Views", num(video.view_count)],
+    box.innerHTML = `<header class="report-head">
+        <h1>${esc(video.title)}</h1>
+        <p class="report-meta">${sample}${esc(video.channel)} · ${plural(video.view_count, "view")}
+          · ${plural(video.comment_count, "comment")}</p>
+        ${stats([
           ["Comments analysed", num(summary.comments_analyzed)],
           ["Items extracted", num(summary.items_extracted)],
           ["Distinct statements", num(summary.distinct_statements)],
-          ["Spam filtered", num(summary.spam_filtered)],
-        ])}`)
+          ["Spam removed", num(summary.spam_filtered)],
+        ])}
+      </header>`
       + questionsSection(report.questions)
       + themesSection(report.themes)
       + timestampsSection(report.timestamps)
       + productsSection(report.products)
       + vocabSection(report.vocabulary)
-      + footerSection(report);
+      + closingSections(report);
   }
 
   box.hidden = false;
   box.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+// `/?demo` opens straight into the sample report.
+if (new URLSearchParams(location.search).has("demo")) $("demoBtn").click();

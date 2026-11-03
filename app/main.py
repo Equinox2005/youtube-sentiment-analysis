@@ -330,9 +330,21 @@ def export_json(report_id: str) -> Response:
     )
 
 
+# The frontend is a few small files; have the browser revalidate them on every
+# load so an update shows up without a hard refresh.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _StaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(_NO_CACHE)
+        return response
+
+
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", _StaticFiles(directory=STATIC_DIR), name="static")
