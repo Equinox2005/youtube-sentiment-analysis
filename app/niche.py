@@ -2,7 +2,7 @@
 
 The unit of analysis here is a niche, not a video. A study pulls the recent
 catalogue of several channels, samples comments across all of them, extracts
-structured items, and then answers questions no single-video tool can:
+structured items, and then answers four questions:
 
   * what does this audience keep asking for that nobody has published?
   * whose audiences overlap, and who owns an exclusive slice?
@@ -28,6 +28,7 @@ from .extraction import (
 from .textutil import month_of, normalize_summary, token_set, tokens
 from .youtube import (
     Comment,
+    QuotaExceeded,
     QuotaMeter,
     VideoInfo,
     YouTubeError,
@@ -63,7 +64,6 @@ class Record:
     kind: str
     summary: str
     quote: str
-    topic: str
     product: str
     stance: str
     comment: Comment
@@ -72,11 +72,6 @@ class Record:
     @property
     def channel(self) -> str:
         return self.video.channel if self.video else ""
-
-
-# --------------------------------------------------------------------------
-# Corpus
-# --------------------------------------------------------------------------
 
 
 @dataclass
@@ -131,6 +126,8 @@ def build_corpus(
                     meter=quota,
                 )
             )
+        except QuotaExceeded:
+            raise
         except YouTubeError:
             pass  # comments disabled, or a transient failure — skip the video
         if progress:
@@ -142,11 +139,6 @@ def build_corpus(
             "Comments may be disabled, or the quota may be exhausted."
         )
     return Corpus(channels=channels, videos=videos, comments=comments, quota=quota)
-
-
-# --------------------------------------------------------------------------
-# Fold: deterministic aggregation between the two model passes
-# --------------------------------------------------------------------------
 
 
 def extract_records(
@@ -197,6 +189,8 @@ def extract_records(
             if signal.trust == "none" or not (0 <= signal.comment_index < len(batch_comments)):
                 continue
             comment = batch_comments[signal.comment_index]
+            if id(comment) in spam_keys:
+                continue
             video = videos.get(comment.video_id)
             signals.append(
                 {
@@ -222,7 +216,6 @@ def extract_records(
                     kind=item.kind,
                     summary=item.summary.strip(),
                     quote=item.quote.strip(),
-                    topic=item.topic.strip().lower(),
                     product=item.product.strip(),
                     stance=item.stance,
                     comment=comment,
@@ -259,11 +252,6 @@ def fold_candidates(records: list[Record]) -> dict[str, list[dict]]:
         )
         for kind, buckets in grouped.items()
     }
-
-
-# --------------------------------------------------------------------------
-# Themes
-# --------------------------------------------------------------------------
 
 
 def _theme_from_members(title: str, description: str, members: list[dict], kind: str) -> dict:
@@ -335,10 +323,16 @@ def build_themes(
                 failures.append(result)
                 continue
             built = []
+            # The prompt asks for each candidate in at most one theme; enforce it
+            # here so the counts stay exact (the first theme listed wins).
+            used: set[int] = set()
             for theme in result.themes:
-                members = [head[i] for i in theme.candidate_indices if 0 <= i < len(head)]
-                if not members:
+                indices = [i for i in dict.fromkeys(theme.candidate_indices)
+                           if 0 <= i < len(head) and i not in used]
+                if not indices:
                     continue
+                used.update(indices)
+                members = [head[i] for i in indices]
                 built.append(_theme_from_members(theme.title, theme.description, members, kind))
             built.sort(key=lambda item: (item["count"], item["likes"]), reverse=True)
             themes[kind] = built
@@ -347,11 +341,6 @@ def build_themes(
     if len(failures) == len(kinds):
         raise ExtractionError(f"Clustering failed for every item kind. First error: {failures[0]}")
     return themes
-
-
-# --------------------------------------------------------------------------
-# Content gaps — demand cross-referenced against what exists
-# --------------------------------------------------------------------------
 
 
 def _theme_keywords(theme: dict, limit: int = 8) -> set[str]:
@@ -365,9 +354,8 @@ def _theme_keywords(theme: dict, limit: int = 8) -> set[str]:
 def content_gaps(themes: dict[str, list[dict]], videos: list[VideoInfo], limit: int = 25) -> list[dict]:
     """Rank audience demand by how poorly the existing catalogue covers it.
 
-    This is the creator-versus-audience gap made concrete: demand comes from the
-    comments, supply comes from the titles, descriptions and tags already
-    published in the same corpus.
+    Demand comes from the comments; supply comes from the titles, descriptions
+    and tags of the videos in the same corpus.
     """
     supply = [
         (video, token_set(f"{video.title} {' '.join(video.tags)} {video.description[:200]}"))
@@ -423,16 +411,28 @@ def content_gaps(themes: dict[str, list[dict]], videos: list[VideoInfo], limit: 
     return gaps[:limit]
 
 
-# --------------------------------------------------------------------------
-# Audience overlap
-# --------------------------------------------------------------------------
+def gap_rows(gaps: list[dict]) -> list[dict]:
+    """Content gaps as flat rows for a CSV file."""
+    return [
+        {
+            "title": gap["title"],
+            "kind": gap["kind"],
+            "comments": gap["count"],
+            "likes": gap["likes"],
+            "channel_spread": gap["channel_spread"],
+            "coverage": gap["coverage"],
+            "gap_score": gap["gap_score"],
+            "closest_video": (gap["closest_video"] or {}).get("title", ""),
+            "description": gap["description"],
+        }
+        for gap in gaps
+    ]
 
 
 def audience_overlap(corpus: Corpus) -> dict:
     """Jaccard overlap between the commenter sets of each pair of channels.
 
-    Nearly free given the fetch already returns author channel IDs, and it is
-    the one metric here that no other tool sells cheaply.
+    Costs no extra quota: the comment fetch already returns author channel IDs.
     """
     videos = corpus.videos_by_id
     per_channel: dict[str, set[str]] = defaultdict(set)
@@ -500,16 +500,10 @@ def audience_overlap(corpus: Corpus) -> dict:
     }
 
 
-# --------------------------------------------------------------------------
-# Vocabulary, products, trust, drift
-# --------------------------------------------------------------------------
-
-
 def vocabulary_report(vocabulary: Counter, videos: list[VideoInfo], limit: int = 40) -> list[dict]:
     """Audience terms with the creators' own vocabulary subtracted out.
 
-    Whatever survives is language the audience brought, which is the part worth
-    having for SEO, ad copy, and naming.
+    Whatever survives is language the audience brought.
     """
     creator_terms: set[str] = set()
     for video in videos:
@@ -572,7 +566,7 @@ def product_report(records: list[Record], limit: int = 30) -> list[dict]:
 
 
 def trust_report(signals: list[dict]) -> list[dict]:
-    """Per-channel trust signals — the influencer-vetting view.
+    """Per-channel trust signals.
 
     Not polarity: purchase intent, sponsorship skepticism, deference, and
     challenges to the creator's expertise, counted separately.
@@ -617,14 +611,17 @@ def _parse_date(value: str) -> datetime | None:
 def rising_themes(themes: dict[str, list[dict]], corpus: Corpus, limit: int = 12) -> list[dict]:
     """Themes over-represented in the recent window relative to the whole corpus.
 
-    Low absolute volume with high acceleration is the interesting quadrant: it is
-    demand that has not surfaced yet.
+    The recent window is the newest third of the sample, capped at 90 days.
     """
     dates = [d for d in (_parse_date(c.published_at) for c in corpus.comments) if d]
     if not dates:
         return []
     reference = max(dates)
-    cutoff = reference - timedelta(days=RECENT_WINDOW_DAYS)
+    window = min(timedelta(days=RECENT_WINDOW_DAYS), (reference - min(dates)) / 3)
+    if not window:
+        return []
+    cutoff = reference - window
+    window_days = max(1, round(window / timedelta(days=1)))
 
     recent_total = sum(1 for date in dates if date >= cutoff)
     baseline = recent_total / len(dates)
@@ -656,6 +653,7 @@ def rising_themes(themes: dict[str, list[dict]], corpus: Corpus, limit: int = 12
                     "recent": recent,
                     "total": theme["count"],
                     "lift": round(lift, 2),
+                    "window_days": window_days,
                     "channel_spread": theme["channel_spread"],
                     "examples": theme["examples"][:2],
                 }
@@ -674,11 +672,6 @@ def theme_drift(themes: dict[str, list[dict]], limit: int = 12) -> list[dict]:
         for theme in flat[:limit]
         if theme["months"]
     ]
-
-
-# --------------------------------------------------------------------------
-# Orchestration
-# --------------------------------------------------------------------------
 
 
 def strip_internals(themes: dict[str, list[dict]]) -> dict[str, list[dict]]:
@@ -709,7 +702,7 @@ def build_study_report(corpus: Corpus, usage: UsageMeter, label: str = "", progr
                 }
                 for channel in corpus.channels
             ],
-            "videos_sampled": len(corpus.videos),
+            "videos_sampled": len({comment.video_id for comment in corpus.comments}),
             "comments_sampled": len(corpus.comments),
             "spam_filtered": len(spam_keys),
             "items_extracted": len(records),

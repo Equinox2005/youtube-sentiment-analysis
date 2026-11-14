@@ -52,7 +52,6 @@ class ExtractedItem(BaseModel):
     # than fidelity to the original wording.
     summary: str
     quote: str
-    topic: str
     product: str   # "" unless kind is product_mention or a product is named
     stance: Stance
 

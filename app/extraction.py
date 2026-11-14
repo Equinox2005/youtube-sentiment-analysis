@@ -12,7 +12,6 @@ hundred pre-aggregated strings and is where the actual judgment happens.
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -39,7 +38,7 @@ class ExtractionError(Exception):
 
 
 class BatchFailed(ExtractionError):
-    """One request came back unusable: refused, cut off, or unparseable.
+    """One request came back unusable: refused, cut off, unparseable, or a server error.
 
     Unlike a bad key or an unknown model, this only affects the one batch, so
     the passes skip it and carry on instead of throwing away the whole study.
@@ -51,9 +50,11 @@ class BatchFailed(ExtractionError):
 _PRICES = {
     "claude-opus-5-5": (4.0, 20.0, 0.20),
     "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4-8": (5.0, 25.0, 0.50),
+    "claude-fable-5-2": (8.0, 40.0, 0.20),
     "claude-fable-5-1": (10.0, 50.0, 0.25),
     "claude-fable-5": (10.0, 50.0, 1.00),
-    "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10),
     "claude-sonnet-5": (2.0, 10.0, 0.20),
     "claude-sonnet-4-6": (3.0, 15.0, 0.30),
     "claude-haiku-5-5": (0.10, 0.50, 0.01),
@@ -64,7 +65,9 @@ _PRICES = {
 # batch (comment sections trip them on ordinary text now and then), the API
 # re-runs it on another model instead of returning a refusal. Not available on
 # the Batches API.
-_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+_FALLBACK_MODELS = {
+    "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-fable-5-1", "claude-sonnet-5-5",
+}
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 _MAX_COMMENT_CHARS = 600
@@ -174,7 +177,7 @@ wherever possible. Consistency here is worth more than elegance.
 are different summaries and must not collapse into each other.
 
 `quote` is a short verbatim span from the comment (trim it, do not paraphrase).
-`topic` is a one-to-three word tag. `product` is "" unless a product is named.
+`product` is "" unless a product is named.
 `stance` applies to product mentions; use "none" elsewhere.
 
 Also return:
@@ -292,7 +295,17 @@ def _complete(client, params: dict, usage: UsageMeter, stream: bool = False) -> 
             "Rate limited by the Anthropic API. Lower NICHE_CONCURRENCY or try again shortly."
         ) from exc
     except anthropic.APIStatusError as exc:
-        raise ExtractionError(f"Anthropic API error ({exc.status_code}): {exc.message}") from exc
+        # The SDK has already retried a 5xx, so what reaches here is one unlucky
+        # request. The code is tested rather than the class, since 500, 503, 504
+        # and 529 each have their own. An overload that arrives mid-stream comes
+        # with the stream's 200, so the error type in the body counts too.
+        detail = exc.body.get("error") if isinstance(exc.body, dict) else None
+        kind = detail.get("type") if isinstance(detail, dict) else None
+        server_side = exc.status_code >= 500 or kind in ("overloaded_error", "api_error")
+        error = BatchFailed if server_side else ExtractionError
+        raise error(f"Anthropic API error ({exc.status_code}): {exc.message}") from exc
+    except anthropic.APITimeoutError as exc:  # a subclass of APIConnectionError
+        raise BatchFailed(f"The Anthropic API timed out: {exc}") from exc
     except anthropic.APIConnectionError as exc:
         raise ExtractionError(f"Could not reach the Anthropic API: {exc}") from exc
     except TypeError as exc:
@@ -308,19 +321,11 @@ def _complete(client, params: dict, usage: UsageMeter, stream: bool = False) -> 
     return _text_of(message)
 
 
-# --------------------------------------------------------------------------
-# Map pass
-# --------------------------------------------------------------------------
-
-
 def _parse_map(raw: str) -> MapResult:
     try:
         return MapResult.model_validate_json(raw)
-    except Exception:
-        try:  # tolerate a stray wrapper if the schema was ever relaxed
-            return MapResult.model_validate(json.loads(raw))
-        except Exception as exc:
-            raise BatchFailed(f"Could not parse extraction output: {exc}") from exc
+    except Exception as exc:
+        raise BatchFailed(f"Could not parse extraction output: {exc}") from exc
 
 
 def _map_sync(client, batches: list[tuple[list[Comment], str]], usage: UsageMeter,
@@ -425,8 +430,9 @@ def run_map(
 ) -> list[tuple[list[Comment], MapResult]]:
     """Run the map pass over (comments, context) jobs, splitting into batches.
 
-    Batches that come back refused, cut off or unparseable are skipped and
-    counted in `usage.failed_requests`. The pass only fails outright when every
+    Batches that come back refused, cut off, unparseable or with a server error
+    (after the SDK's own retries) are skipped and counted in
+    `usage.failed_requests`. The pass only fails outright when every
     batch does, or on an error that would hit all of them (bad key, bad model).
     """
     client = _client()
@@ -445,11 +451,6 @@ def run_map(
     if failures and not results:
         raise ExtractionError(f"Every extraction request failed. First error: {failures[0]}")
     return results
-
-
-# --------------------------------------------------------------------------
-# Reduce pass
-# --------------------------------------------------------------------------
 
 
 def run_reduce(kind: str, candidates: list[dict], usage: UsageMeter) -> ReduceResult:

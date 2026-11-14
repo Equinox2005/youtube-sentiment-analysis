@@ -1,4 +1,4 @@
-"""Single-video comment intelligence.
+"""Single-video reports.
 
 Same engine as a niche study, scoped to one video. The output is deliberately
 not a sentiment breakdown: a positive/negative split on YouTube comments lands
@@ -90,7 +90,7 @@ def timestamp_heatmap(comments: list[Comment], limit: int = 12) -> list[dict]:
 
 
 def _flatten_questions(themes: dict[str, list[dict]], limit: int = 15) -> list[dict]:
-    """Top unanswered questions — the cheapest reply a creator can make."""
+    """Top unanswered questions, most asked first."""
     rows = []
     for theme in themes.get("question", []):
         example = theme["examples"][0] if theme["examples"] else {}
@@ -115,7 +115,7 @@ def build_report(
     usage: UsageMeter | None = None,
     progress=None,
 ) -> dict:
-    """Compute the full comment-intelligence report from already-fetched data."""
+    """Compute the full report from already-fetched data."""
     usage = usage or UsageMeter()
     quota = quota or QuotaMeter()
 
@@ -166,7 +166,7 @@ def analyze_video(
     sort_by: str = "relevance",
     progress=None,
 ) -> dict:
-    """Fetch a video's comments and build the comment-intelligence report.
+    """Fetch a video's comments and build the report.
 
     `progress`, if given, is called as progress(stage, done, total) with stage
     one of "comments", "extract" or "themes".

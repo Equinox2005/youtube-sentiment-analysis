@@ -42,7 +42,7 @@ For real runs, copy `.env.example` to `.env` and fill in two keys:
 The same thing works from the command line:
 
 ```bash
-python cli.py study @channel1 @channel2 @channel3 --videos 8 --comments 300
+python cli.py study "@channel1" "@channel2" "@channel3" --videos 8 --comments 300
 python cli.py video "https://www.youtube.com/watch?v=VIDEO_ID"
 python cli.py estimate --channels 12 --videos 8 --comments 500
 python cli.py study demo
@@ -67,8 +67,8 @@ listed at http://127.0.0.1:8000/docs.
 4. **Reduce.** One Claude call per item type groups those statements into named
    themes.
 5. **Analyse.** The rest is plain Python. Request, question and confusion themes
-   are compared against the titles, tags and descriptions already published to
-   find gaps; commenter IDs give the audience overlap between channels; dates
+   are compared against the titles, tags and descriptions of the sampled videos
+   to find gaps; commenter IDs give the audience overlap between channels; dates
    give the themes that are rising.
 
 When the default model declines a batch, the API retries it on another model. A
@@ -86,8 +86,9 @@ cost.
   under-sampled.
 - Themes are a language model's grouping. The counts are exact, but the groups
   are worth checking against the quoted comments.
-- Gap detection is keyword overlap with existing videos. A video that covers a
-  topic without naming it in its title, tags or description won't count.
+- Gap detection is keyword overlap with the videos sampled for comments. A video
+  that covers a topic without naming it in its title, tags or description won't
+  count, and neither will an older upload outside the sample.
 - Real runs cost money. Both passes default to `claude-opus-5-5`.
   `NICHE_MAP_MODEL=claude-haiku-5-5` makes the expensive pass much cheaper, and
   `NICHE_USE_BATCH_API=true` halves the price but can take hours (see
@@ -117,3 +118,7 @@ pytest
 ```
 
 The tests stub out both APIs, so they run offline and without keys.
+
+## License
+
+MIT

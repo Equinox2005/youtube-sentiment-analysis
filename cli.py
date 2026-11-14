@@ -1,6 +1,6 @@
 """Command-line interface for YouTube Audience Research.
 
-    python cli.py study @channel1 @channel2 --videos 8 --comments 300
+    python cli.py study "@channel1" "@channel2" --videos 8 --comments 300
     python cli.py study demo
     python cli.py video "https://youtube.com/watch?v=..." --comments 500
     python cli.py estimate --channels 12 --videos 8 --comments 500
@@ -61,11 +61,6 @@ def _print_cost(report: dict) -> None:
         print(f"   {usage['failed_requests']} request(s) came back unusable and were skipped.")
 
 
-# --------------------------------------------------------------------------
-# Printers
-# --------------------------------------------------------------------------
-
-
 def _sample_note(report: dict) -> str:
     return "  (sample data)" if report.get("demo") else ""
 
@@ -97,8 +92,9 @@ def print_study(report: dict) -> None:
     if report.get("rising"):
         _header("Rising")
         for row in report["rising"][:6]:
+            unit = "day" if row["window_days"] == 1 else "days"
             print(f"   {row['lift']:>4.1f}x  {row['title']}  "
-                  f"({row['recent']}/{row['total']} in the last 90 days)")
+                  f"({row['recent']}/{row['total']} in the last {row['window_days']} {unit})")
 
     overlap = report.get("audience_overlap", {})
     if overlap.get("nodes"):
@@ -124,7 +120,7 @@ def print_study(report: dict) -> None:
         for row in report["trust"][:10]:
             print(f"   {row['channel'][:30]:<30} ratio {row['trust_ratio']:.2f} · "
                   f"{row['purchase_intent']} intent · "
-                  f"{row['sponsorship_skepticism']} skeptical")
+                  f"{row['sponsorship_skepticism']} sceptical")
 
     if report.get("vocabulary"):
         _header("Audience vocabulary")
@@ -145,7 +141,7 @@ def print_video(report: dict) -> None:
     _header(f"{video['title']}  —  {video['channel']}{_sample_note(report)}")
     print(f"   {video['view_count']:,} views · {video['like_count']:,} likes · "
           f"{video['comment_count']:,} comments")
-    print(f"   {summary['comments_analyzed']} analyzed → {summary['items_extracted']} items, "
+    print(f"   {summary['comments_analyzed']} analysed → {summary['items_extracted']} items, "
           f"{summary['spam_filtered']} spam filtered")
     counts = ", ".join(f"{k} {v}" for k, v in summary["counts_by_kind"].items())
     if counts:
@@ -189,15 +185,17 @@ def print_video(report: dict) -> None:
     _print_caveats(report)
 
 
-# --------------------------------------------------------------------------
-# Commands
-# --------------------------------------------------------------------------
+def _studies_per_day(estimate: dict) -> str:
+    if estimate["studies_per_day"]:
+        return f"{estimate['studies_per_day']} studies per day on the free tier"
+    return "more than the free tier allows in a day"
 
 
 def cmd_study(args) -> int:
     from app.demo import demo_study
+    from app.niche import gap_rows
 
-    refs = [ref for ref in args.channels if ref.strip()]
+    refs = [part.strip() for ref in args.channels for part in ref.split(",") if part.strip()]
     if len(refs) == 1 and refs[0].strip().lower() == "demo":
         report = demo_study()
     else:
@@ -206,7 +204,7 @@ def cmd_study(args) -> int:
         print(f"\nPlanned: {len(refs)} channels × {args.videos} videos × "
               f"{args.comments} comments = {preview['videos']} videos")
         print(f"Estimated YouTube quota: {preview['estimated_units']} units "
-              f"({preview['studies_per_day']} studies/day on the free tier)\n")
+              f"({_studies_per_day(preview)})\n")
 
         from app.niche import run_study
 
@@ -224,7 +222,7 @@ def cmd_study(args) -> int:
             return 1
 
     print_study(report)
-    _write_outputs(args, report, gap_rows=report.get("content_gaps", []))
+    _write_outputs(args, report, rows=gap_rows(report.get("content_gaps", [])))
     return 0
 
 
@@ -248,7 +246,7 @@ def cmd_video(args) -> int:
             return 1
 
     print_video(report)
-    _write_outputs(args, report, gap_rows=report.get("questions", []))
+    _write_outputs(args, report, rows=report.get("questions", []))
     return 0
 
 
@@ -261,29 +259,21 @@ def cmd_estimate(args) -> int:
         print(f"   {endpoint:<22} {calls:>6} calls")
     print(f"\n   Total: {result['estimated_units']} units of "
           f"{result['daily_free_tier']:,}/day")
-    print(f"   That is {result['studies_per_day']} studies per day on the free tier.")
+    print(f"   That is {_studies_per_day(result)}.")
     return 0
 
 
-def _write_outputs(args, report: dict, gap_rows: list[dict]) -> None:
+def _write_outputs(args, report: dict, rows: list[dict]) -> None:
     if getattr(args, "json", None):
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2, ensure_ascii=False)
         print(f"\nFull report written to {args.json}")
-    if getattr(args, "csv", None) and gap_rows:
-        fields = list(gap_rows[0].keys())
+    if getattr(args, "csv", None) and rows:
         with open(args.csv, "w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]), extrasaction="ignore")
             writer.writeheader()
-            for row in gap_rows:
-                writer.writerow({k: _flatten(v) for k, v in row.items() if k in fields})
+            writer.writerows(rows)
         print(f"Table written to {args.csv}")
-
-
-def _flatten(value):
-    if isinstance(value, (list, dict)):
-        return json.dumps(value, ensure_ascii=False)[:500]
-    return value
 
 
 def main() -> int:
@@ -305,18 +295,19 @@ def main() -> int:
     study.add_argument("--csv", metavar="FILE", help="Write content gaps as CSV")
     study.set_defaults(func=cmd_study)
 
-    video = sub.add_parser("video", help="Comment intelligence for a single video")
+    video = sub.add_parser("video", help="Report on one video's comments")
     video.add_argument("url", help="Video URL/ID, or 'demo'")
-    video.add_argument("--comments", type=int, default=500)
-    video.add_argument("--sort", choices=["latest", "top"], default="top")
-    video.add_argument("--json", metavar="FILE")
-    video.add_argument("--csv", metavar="FILE")
+    video.add_argument("--comments", type=int, default=500, help="Comments to read (default 500)")
+    video.add_argument("--sort", choices=["latest", "top"], default="top",
+                       help="Comment order (default 'top')")
+    video.add_argument("--json", metavar="FILE", help="Write the full report as JSON")
+    video.add_argument("--csv", metavar="FILE", help="Write the unanswered questions as CSV")
     video.set_defaults(func=cmd_video)
 
     est = sub.add_parser("estimate", help="Predict a study's quota cost")
-    est.add_argument("--channels", type=int, required=True)
-    est.add_argument("--videos", type=int, default=8)
-    est.add_argument("--comments", type=int, default=300)
+    est.add_argument("--channels", type=int, required=True, help="Number of channels")
+    est.add_argument("--videos", type=int, default=8, help="Videos per channel (default 8)")
+    est.add_argument("--comments", type=int, default=300, help="Comments per video (default 300)")
     est.set_defaults(func=cmd_estimate)
 
     args = parser.parse_args()

@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
+from urllib.parse import unquote
 
 
 class YouTubeError(Exception):
     """User-facing error while talking to YouTube."""
+
+
+class QuotaExceeded(YouTubeError):
+    """The daily quota is spent, so every later call will fail the same way."""
 
 
 VIDEO_ID_PATTERNS = [
@@ -31,7 +35,10 @@ VIDEO_ID_PATTERNS = [
 ]
 
 _CHANNEL_ID_RE = re.compile(r"(UC[A-Za-z0-9_-]{22})")
-_HANDLE_RE = re.compile(r"@([A-Za-z0-9._\-]{3,30})")
+# A handle runs to the next URL delimiter, so letters from any script, combining
+# marks included, stay whole. One longer than 30 characters is refused, not cut.
+# A ")", "." or "!" straight after it, as in "(@name).", is not part of it.
+_HANDLE_RE = re.compile(r"@([^\s/?#&@,;]{3,30}?)[.!)]*(?![^\s/?#&@,;])")
 
 # Quota costs, kept here so the meter and the docs cannot drift apart.
 QUOTA_COSTS = {
@@ -76,26 +83,31 @@ def parse_channel_ref(ref: str) -> tuple[str, str]:
 
     Accepts channel URLs, /channel/UC... paths, @handles, and raw IDs.
     """
-    text = ref.strip()
+    text = unquote(ref.strip())
     if not text:
         raise YouTubeError("Empty channel reference.")
 
-    match = _CHANNEL_ID_RE.search(text)
-    if match:
-        return "id", match.group(1)
+    # Two references run together would otherwise be read as the first one alone.
+    if not re.search(r"[\s,;]", text):
+        # Handle first: a handle may itself start with "UC".
+        match = _HANDLE_RE.search(text)
+        if match:
+            return "handle", match.group(1)
 
-    match = _HANDLE_RE.search(text)
-    if match:
-        return "handle", match.group(1)
+        match = _CHANNEL_ID_RE.search(text)
+        if match:
+            return "id", match.group(1)
 
-    # A bare word is treated as a handle — youtube.com/c/Name style links land here.
-    bare = text.rstrip("/").split("/")[-1]
-    if bare and re.fullmatch(r"[A-Za-z0-9._\-]{3,30}", bare):
-        return "handle", bare
+        # A bare word is treated as a handle: youtube.com/c/Name style links land here.
+        # Not when the text has an "@": that handle was refused above, and the last
+        # path segment ("videos") is not the channel.
+        bare = text.rstrip("/").split("/")[-1]
+        if "@" not in text and bare and re.fullmatch(r"[A-Za-z0-9._\-]{3,30}", bare):
+            return "handle", bare
 
     raise YouTubeError(
-        f"Could not understand the channel reference {ref!r}. "
-        "Use a channel URL, an @handle, or a UC... channel ID."
+        f"Could not understand the channel reference {ref!r}. Use a channel URL, an @handle, "
+        "or a UC... channel ID, and separate channels with commas or new lines."
     )
 
 
@@ -142,7 +154,6 @@ class ChannelInfo:
     description: str = ""
 
 
-@lru_cache(maxsize=4)
 def _build_client(api_key: str):
     from googleapiclient.discovery import build
 
@@ -152,24 +163,20 @@ def _build_client(api_key: str):
 def _translate_http_error(exc: Exception) -> YouTubeError:
     message = str(exc)
     if "quotaExceeded" in message:
-        return YouTubeError("YouTube API quota exceeded. Try again later (quota resets daily).")
+        return QuotaExceeded("YouTube API quota exceeded. Try again later (quota resets daily).")
     if "commentsDisabled" in message:
         return YouTubeError("Comments are disabled for this video.")
     if "API key not valid" in message or "keyInvalid" in message:
         return YouTubeError("The configured YouTube API key is invalid.")
     if "videoNotFound" in message or "notFound" in message:
         return YouTubeError("Video not found. Check the URL and try again.")
-    return YouTubeError(f"YouTube API error: {message}")
+    # str() of an HttpError includes the request URL, and with it the API key.
+    return YouTubeError(f"YouTube API error: {getattr(exc, 'reason', None) or message}")
 
 
 def _chunks(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
-
-
-# --------------------------------------------------------------------------
-# Channels
-# --------------------------------------------------------------------------
 
 
 def _channel_from_item(item: dict) -> ChannelInfo:
@@ -217,6 +224,9 @@ def resolve_channels(
             for item in response.get("items", []):
                 info = _channel_from_item(item)
                 resolved[info.channel_id] = info
+        for channel_id in ids:
+            if channel_id not in resolved:
+                raise YouTubeError(f"No channel found for ID {channel_id}.")
 
         for handle in handles:
             response = youtube.channels().list(part=parts, forHandle=handle).execute()
@@ -267,11 +277,6 @@ def fetch_channel_video_ids(
             return video_ids[:limit]
         raise _translate_http_error(exc) from exc
     return video_ids[:limit]
-
-
-# --------------------------------------------------------------------------
-# Videos
-# --------------------------------------------------------------------------
 
 
 def _video_from_item(item: dict) -> VideoInfo:
@@ -325,11 +330,6 @@ def fetch_video_info(api_key: str, video_id: str, meter: QuotaMeter | None = Non
     if not videos:
         raise YouTubeError("Video not found. Check the URL and try again.")
     return videos[0]
-
-
-# --------------------------------------------------------------------------
-# Comments
-# --------------------------------------------------------------------------
 
 
 def fetch_comments(

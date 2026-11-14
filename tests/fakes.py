@@ -93,7 +93,7 @@ def map_reply(params) -> dict:
             product, stance = rest if rest else ("", "none")
             result["items"].append({
                 "comment_index": index, "kind": kind, "summary": summary, "quote": quote,
-                "topic": "", "product": product, "stance": stance,
+                "product": product, "stance": stance,
             })
     return result
 

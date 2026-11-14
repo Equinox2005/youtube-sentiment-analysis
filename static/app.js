@@ -59,11 +59,19 @@ document.querySelectorAll(".tab").forEach((tab) => {
       t.setAttribute("aria-selected", String(t === tab));
     });
     state.mode = tab.dataset.mode;
-    $("studyFields").hidden = state.mode !== "study";
-    $("videoFields").hidden = state.mode !== "video";
-    $("report").hidden = true;
+    showFields();
   });
 });
+
+// A hidden field that fails validation would block the form without a message,
+// so the fields of the other mode are disabled as well as hidden.
+function showFields() {
+  for (const [id, mode] of [["studyFields", "study"], ["videoFields", "video"]]) {
+    $(id).hidden = state.mode !== mode;
+    $(id).querySelectorAll("input, textarea, select").forEach((el) => { el.disabled = state.mode !== mode; });
+  }
+}
+showFields();
 
 fetch("/api/status").then((r) => r.json()).then((s) => {
   const missing = [];
@@ -115,17 +123,19 @@ $("runForm").addEventListener("submit", (event) => {
   let url;
   if (state.mode === "study") {
     const channels = $("channels").value.trim();
-    if (!channels) return;
+    if (!channels) { $("channels").focus(); return; }
     params.set("channels", channels);
-    params.set("videos_per_channel", $("videosPer").value);
-    params.set("comments_per_video", $("commentsPer").value);
+    // An emptied number box falls back to the API's default.
+    if ($("videosPer").value) params.set("videos_per_channel", $("videosPer").value);
+    if ($("commentsPer").value) params.set("comments_per_video", $("commentsPer").value);
     params.set("sort_by", $("sortBy").value);
+    if ($("studyName").value.trim()) params.set("label", $("studyName").value.trim());
     url = `/api/study/stream?${params}`;
   } else {
     const videoUrl = $("videoUrl").value.trim();
-    if (!videoUrl) return;
+    if (!videoUrl) { $("videoUrl").focus(); return; }
     params.set("url", videoUrl);
-    params.set("max_comments", $("videoComments").value);
+    if ($("videoComments").value) params.set("max_comments", $("videoComments").value);
     url = `/api/analyze/stream?${params}`;
   }
 
@@ -134,7 +144,7 @@ $("runForm").addEventListener("submit", (event) => {
   $("progress").hidden = false;
   $("progressFill").style.width = "2%";
   $("progressLabel").textContent = "Starting…";
-  $("runBtn").disabled = true;
+  setBusy(true);
 
   const source = new EventSource(url);
   state.source = source;
@@ -149,7 +159,7 @@ $("runForm").addEventListener("submit", (event) => {
     } else if (event.type === "done") {
       source.close(); state.source = null;
       $("progress").hidden = true;
-      $("runBtn").disabled = false;
+      setBusy(false);
       render(event.report);
     } else if (event.type === "error") {
       source.close(); state.source = null;
@@ -162,9 +172,15 @@ $("runForm").addEventListener("submit", (event) => {
   };
 });
 
+// The demo button submits the same form, so it would cut off a run in progress.
+function setBusy(busy) {
+  $("runBtn").disabled = busy;
+  $("demoBtn").disabled = busy;
+}
+
 function fail(detail) {
   $("progress").hidden = true;
-  $("runBtn").disabled = false;
+  setBusy(false);
   $("error").hidden = false;
   $("error").textContent = detail;
 }
@@ -227,15 +243,25 @@ function columnPath(x, y, w, h, r) {
 
 /** Small column chart for a month -> count series. */
 function monthChart(months) {
-  const entries = Object.entries(months);
-  if (!entries.length) return "";
+  const keys = Object.keys(months).sort();
+  if (!keys.length) return "";
+  // Walk every month from the first to the last so a quiet month shows as a gap.
+  const entries = [];
+  let [year, month] = keys[0].split("-").map(Number);
+  const [lastYear, lastMonth] = keys[keys.length - 1].split("-").map(Number);
+  while (year < lastYear || (year === lastYear && month <= lastMonth)) {
+    const key = `${year}-${String(month).padStart(2, "0")}`;
+    entries.push([key, months[key] || 0]);
+    if (++month > 12) { month = 1; year++; }
+  }
   const width = 240, height = 76, axis = 20, plot = height - axis;
   const max = Math.max(...entries.map(([, v]) => v));
   const step = width / entries.length;
-  const colWidth = Math.min(24, step - 6);
+  const colWidth = Math.min(24, Math.max(step - 6, step / 2));
 
   const cols = entries.map(([month, value], i) => {
-    const h = max > 0 ? Math.max(2, (value / max) * (plot - 4)) : 2;
+    if (!value) return "";
+    const h = Math.max(2, (value / max) * (plot - 4));
     const x = i * step + (step - colWidth) / 2;
     return `<path d="${columnPath(x, plot - h, colWidth, h, 4)}" style="fill:var(--accent)"
       data-tip="${esc(`<b>${esc(monthLabel(month))}</b><br>${num(value)} comments`)}"/>`;
@@ -334,21 +360,24 @@ function gapsSection(gaps) {
         ${quoteBlock(gap.examples?.[0])}
       </div>
     </li>`).join("");
-  return section("Content gaps", `<ol class="gaps">${items}</ol>`);
+  return section("Content gaps", `<ol class="gaps">${items}</ol>
+    <p class="note">Coverage is checked against the videos sampled in this study, not each
+      channel's whole catalogue.</p>`);
 }
 
 function risingSection(rising) {
   if (!rising?.length) return "";
   const max = Math.max(...rising.map((r) => r.lift));
+  const days = (n) => `${num(n)} ${n === 1 ? "day" : "days"}`;
   const rows = rising.map((row) => barRow(
     `${esc(row.title)}<span class="desc">${esc(KIND_NAME[row.kind] || row.kind)} · ${num(row.recent)} of
-      ${num(row.total)} comments in the last 90 days</span>`,
+      ${num(row.total)} comments in the last ${days(row.window_days)}</span>`,
     bar(row.lift, max, `<b>${row.lift}× the corpus rate</b>`),
     `${row.lift.toFixed(1)}×`,
   )).join("");
   return section("Rising", `<div class="bars">${barHead("Theme", "Lift")}${rows}</div>
-    <p class="note">Lift compares a theme's share of comments from the last 90 days with the
-      share for the corpus as a whole.</p>`);
+    <p class="note">Lift compares a theme's share of comments from the last ${days(rising[0].window_days)}
+      with the share for the corpus as a whole.</p>`);
 }
 
 function themesSection(themes) {
@@ -369,15 +398,18 @@ function themesSection(themes) {
 }
 
 function overlapSection(overlap) {
-  if (!overlap?.nodes?.length) return "";
-  const table = `<div class="scroll-x"><table class="data">
+  if (!(overlap?.nodes?.length >= 2)) return "";
+  const table = !overlap.edges.length
+    ? `<p>None of these channels share a sampled commenter.</p>`
+    : `<div class="scroll-x"><table class="data">
     <thead><tr><th>Channel A</th><th>Channel B</th><th class="num">Shared</th>
       <th class="num">Jaccard</th><th class="num">% of A</th><th class="num">% of B</th></tr></thead>
     <tbody>${overlap.edges.map((e) => `<tr><td>${esc(e.source)}</td><td>${esc(e.target)}</td>
       <td class="num">${num(e.shared)}</td><td class="num">${e.jaccard.toFixed(3)}</td>
       <td class="num">${e.pct_of_source}%</td><td class="num">${e.pct_of_target}%</td></tr>`).join("")}
     </tbody></table></div>`;
-  const graph = overlapGraph(overlap.nodes, overlap.edges);
+  // Past seven channels the names beside the circle run into each other.
+  const graph = overlap.nodes.length <= 7 ? overlapGraph(overlap.nodes, overlap.edges) : "";
   const figure = graph ? `<figure class="overlap-figure">${graph}
     <figcaption class="note">Circle size is commenters sampled; line width is commenters
       the two channels share.</figcaption></figure>` : "";
@@ -470,9 +502,12 @@ function questionsSection(questions) {
 function closingSections(report) {
   const id = encodeURIComponent(report._id || "");
   const quota = report.quota || {}, usage = report.usage || {};
-  const files = report.study
-    ? [["Content gaps", "gaps.csv"], ["Themes", "themes.csv"], ["Audience overlap", "overlap.csv"]]
-    : [["Themes", "themes.csv"]];
+  // The server answers 404 for an export with no rows, so only offer the ones that have data.
+  const files = [
+    [report.content_gaps?.length, "Content gaps", "gaps.csv"],
+    [Object.values(report.themes || {}).some((list) => list.length), "Themes", "themes.csv"],
+    [report.audience_overlap?.edges?.length, "Audience overlap", "overlap.csv"],
+  ].filter(([has]) => has).map(([, label, file]) => [label, file]);
   const links = files.map(([label, file]) =>
     `<a href="/api/export/${id}/${file}" download>${label} (CSV)</a>`).join("")
     + `<a href="/api/export/${id}.json" download>Full report (JSON)</a>`;
@@ -550,7 +585,17 @@ function render(report) {
 
   box.hidden = false;
   box.scrollIntoView({ behavior: "smooth", block: "start" });
+  // The server keeps recent reports, so the id in the address survives a reload.
+  if (report._id) history.replaceState(null, "", `#${encodeURIComponent(report._id)}`);
 }
 
+// A reload reopens the report named in the address if the server still has it;
 // `/?demo` opens straight into the sample report.
-if (new URLSearchParams(location.search).has("demo")) $("demoBtn").click();
+const openDemo = () => { if (new URLSearchParams(location.search).has("demo")) $("demoBtn").click(); };
+const saved = location.hash.slice(1);
+if (/^[\w-]+$/.test(saved)) {
+  fetch(`/api/export/${saved}.json`)
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then(render)
+    .catch(() => { history.replaceState(null, "", location.pathname + location.search); openDemo(); });
+} else openDemo();

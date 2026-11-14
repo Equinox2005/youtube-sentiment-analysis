@@ -107,6 +107,61 @@ def test_map_skips_a_refused_batch_and_keeps_the_rest(monkeypatch, use_client):
     assert usage.failed_requests == 1
 
 
+def _api_error(cls, status):
+    response = httpx2.Response(status, request=httpx2.Request("POST", "https://api.anthropic.com"))
+    return cls("api error", response=response, body=None)
+
+
+@pytest.mark.parametrize("error", [
+    _api_error(anthropic.OverloadedError, 529),
+    _api_error(anthropic.InternalServerError, 500),
+    anthropic.APITimeoutError(request=httpx2.Request("POST", "https://api.anthropic.com")),
+])
+def test_map_skips_a_batch_the_api_could_not_serve(monkeypatch, use_client, error):
+    monkeypatch.setenv("NICHE_BATCH_SIZE", "5")
+
+    def fail_second_batch(params):
+        if "ask number 5" in params["messages"][0]["content"]:
+            raise error
+        return map_reply(params)
+
+    use_client(fake_anthropic(map_fn=fail_second_batch))
+    usage = UsageMeter()
+    assert len(run_map(_jobs(15), usage)) == 2
+    assert usage.failed_requests == 1
+
+
+def test_an_overload_inside_a_stream_skips_only_that_request():
+    # The API reports this as an error event after a 200, not as a 529.
+    sse = (
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message",'
+        '"role":"assistant","model":"claude-x","content":[],"stop_reason":null,"stop_sequence":null,'
+        '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n'
+    )
+
+    def handler(request):
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+
+    client = anthropic.Anthropic(
+        api_key="test", max_retries=0,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
+    )
+    params = {"model": "claude-x", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}
+    with pytest.raises(BatchFailed):
+        extraction._complete(client, params, UsageMeter(), stream=True)
+
+
+def test_a_bad_request_still_stops_the_pass(use_client):
+    def reject(params):
+        raise _api_error(anthropic.BadRequestError, 400)
+
+    use_client(fake_anthropic(map_fn=reject))
+    with pytest.raises(ExtractionError) as raised:
+        run_map(_jobs(3), UsageMeter())
+    assert not isinstance(raised.value, BatchFailed)
+
+
 def test_map_fails_when_every_batch_fails(use_client):
     use_client(fake_anthropic(map_fn=lambda params: make_message("not json")))
     with pytest.raises(ExtractionError, match="Every extraction request failed"):

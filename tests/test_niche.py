@@ -1,6 +1,8 @@
 import json
 from collections import Counter
 
+import anthropic
+import httpx2
 import pytest
 from fakes import fake_anthropic, make_message, reduce_reply
 
@@ -12,6 +14,7 @@ from app.niche import (
     build_study_report,
     build_themes,
     content_gaps,
+    extract_records,
     fold_candidates,
     product_report,
     rising_themes,
@@ -33,7 +36,7 @@ def _comment(text="", video_id="v1", author="", likes=0, published_at="2026-05-0
 
 def _record(summary, kind="request", likes=0, published_at="2026-05-01T00:00:00Z",
             product="", stance="none", video=None):
-    return Record(kind=kind, summary=summary, quote=summary, topic="", product=product,
+    return Record(kind=kind, summary=summary, quote=summary, product=product,
                   stance=stance, comment=_comment(likes=likes, published_at=published_at),
                   video=video)
 
@@ -110,6 +113,24 @@ def test_rising_themes_flags_recent_acceleration():
     assert rising[0]["lift"] == 2.0
 
 
+def test_rising_themes_on_a_sample_shorter_than_ninety_days():
+    def day(n):
+        return f"2026-05-{n:02d}T00:00:00Z"
+
+    comments = [_comment(published_at=day(n)) for n in range(1, 31) for _ in range(4)]
+    corpus = Corpus(channels=[], videos=[], comments=comments, quota=QuotaMeter())
+
+    def theme(title, days):
+        return {"title": title, "description": "", "count": len(days), "channel_spread": 1,
+                "examples": [], "_records": [_record(title, published_at=day(n)) for n in days]}
+
+    themes = {"request": [theme("New this week", [27, 28, 29, 30]), theme("All month", [3, 10, 17, 24, 30])]}
+    (row,) = rising_themes(themes, corpus)
+    assert row["title"] == "New this week"
+    assert row["window_days"] == 10
+    assert row["lift"] == 3.0
+
+
 def test_product_and_trust_reports():
     records = [
         _record("zero is great", kind="product_mention", product="Niche Zero", stance="recommends"),
@@ -148,6 +169,44 @@ def test_build_themes_skips_a_kind_whose_clustering_fails(use_client):
     themes = build_themes(candidates, usage)
     assert set(themes) == {"request"}
     assert usage.failed_requests == 1
+
+
+def test_build_themes_skips_a_kind_the_api_could_not_serve(use_client):
+    def overload_complaints(params):
+        if "Item kind: complaint" in params["messages"][0]["content"]:
+            response = httpx2.Response(529, request=httpx2.Request("POST", "https://api.anthropic.com"))
+            raise anthropic.OverloadedError("overloaded", response=response, body=None)
+        return reduce_reply(params)
+
+    use_client(fake_anthropic(reduce_fn=overload_complaints))
+    candidates = fold_candidates([_record("grinder guide"), _record("audio too quiet", kind="complaint")])
+    usage = UsageMeter()
+    themes = build_themes(candidates, usage)
+    assert set(themes) == {"request"}
+    assert usage.failed_requests == 1
+
+
+def test_build_themes_counts_a_repeated_candidate_once(use_client):
+    def repeats(params):
+        return {"themes": [{"title": "A", "description": "", "candidate_indices": [0, 0, 1]},
+                           {"title": "B", "description": "", "candidate_indices": [0]}]}
+
+    use_client(fake_anthropic(reduce_fn=repeats))
+    records = [_record("grinder guide"), _record("grinder guide"), _record("water guide")]
+    themes = build_themes(fold_candidates(records), UsageMeter())["request"]
+    assert [(theme["title"], theme["count"]) for theme in themes] == [("A", 3)]
+
+
+def test_spam_comments_carry_no_trust_signal(use_client):
+    use_client(fake_anthropic())
+    corpus = Corpus(channels=[], videos=[_video("v1", "Bench")], quota=QuotaMeter(), comments=[
+        _comment("signal:deference", "v1", "ann"),
+        _comment("spam:signal:purchase_intent", "v1", "bot"),
+    ])
+    _, spam_keys, _, signals = extract_records(corpus, UsageMeter())
+    assert len(spam_keys) == 1
+    (row,) = trust_report(signals)
+    assert (row["deference"], row["purchase_intent"]) == (1, 0)
 
 
 def test_build_themes_fails_when_every_kind_fails(use_client):
@@ -191,3 +250,11 @@ def test_study_report_end_to_end(use_client):
     assert report["usage"]["requests"] == len(client.calls) == 2 + 2
     assert stages == {"extract", "themes"}
     json.dumps(report)  # no internal back-references left in the output
+
+
+def test_videos_sampled_counts_only_videos_that_gave_comments(use_client):
+    use_client(fake_anthropic())
+    videos = [_video("v1", "Bench", title="A"), _video("v2", "Bench", title="B")]
+    corpus = Corpus(channels=[], videos=videos, quota=QuotaMeter(),
+                    comments=[_comment("request|grinder guide|do a grinder guide", "v1", "ann")])
+    assert build_study_report(corpus, UsageMeter())["study"]["videos_sampled"] == 1

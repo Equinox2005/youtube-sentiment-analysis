@@ -63,7 +63,7 @@ _GAPS = [
         "coverage": "none",
         "coverage_score": 0.125,
         "closest_video": None,
-        "gap_score": 480.35,
+        "gap_score": 480.92,
         "keywords": ["budget", "burr", "espresso", "grinder", "machine", "upgrade"],
         "examples": [
             _example(
@@ -97,7 +97,7 @@ _GAPS = [
             "video_id": "demo0000000",
             "channel": "Roast Theory",
         },
-        "gap_score": 240.18,
+        "gap_score": 239.68,
         "keywords": ["water", "filter", "scale", "minerals", "distilled", "recipe"],
         "examples": [
             _example(
@@ -126,7 +126,7 @@ _GAPS = [
         "coverage": "none",
         "coverage_score": 0.0,
         "closest_video": None,
-        "gap_score": 302.97,
+        "gap_score": 302.98,
         "keywords": ["repair", "parts", "gasket", "reliability", "years", "warranty"],
         "examples": [
             _example(
@@ -154,7 +154,7 @@ _GAPS = [
             "video_id": "demo0000000",
             "channel": "Pull & Purge",
         },
-        "gap_score": 128.10,
+        "gap_score": 128.09,
         "keywords": ["light", "roast", "dial", "ratio", "temperature", "sour"],
         "examples": [
             _example(
@@ -178,7 +178,7 @@ _GAPS = [
         "coverage": "none",
         "coverage_score": 0.111,
         "closest_video": None,
-        "gap_score": 190.61,
+        "gap_score": 190.74,
         "keywords": ["space", "small", "counter", "apartment", "setup", "compact"],
         "examples": [
             _example(
@@ -273,13 +273,13 @@ _OVERLAP = {
     ],
     "edges": [
         {"source": "The Coffee Bench", "target": "Pull & Purge", "shared": 512,
-         "jaccard": 0.2075, "pct_of_source": 27.8, "pct_of_target": 45.7},
+         "jaccard": 0.2092, "pct_of_source": 27.8, "pct_of_target": 45.7},
         {"source": "Pull & Purge", "target": "Roast Theory", "shared": 231,
-         "jaccard": 0.1774, "pct_of_source": 20.6, "pct_of_target": 55.7},
+         "jaccard": 0.1771, "pct_of_source": 20.6, "pct_of_target": 55.7},
         {"source": "The Coffee Bench", "target": "Roast Theory", "shared": 198,
-         "jaccard": 0.0937, "pct_of_source": 10.8, "pct_of_target": 47.7},
+         "jaccard": 0.0963, "pct_of_source": 10.8, "pct_of_target": 47.7},
         {"source": "The Coffee Bench", "target": "Small Kitchen Coffee", "shared": 154,
-         "jaccard": 0.0658, "pct_of_source": 8.4, "pct_of_target": 24.1},
+         "jaccard": 0.0662, "pct_of_source": 8.4, "pct_of_target": 24.1},
         {"source": "Pull & Purge", "target": "Small Kitchen Coffee", "shared": 88,
          "jaccard": 0.0526, "pct_of_source": 7.9, "pct_of_target": 13.8},
     ],
@@ -319,12 +319,12 @@ _PRODUCTS = [
 _TRUST = [
     {"channel": "The Coffee Bench", "purchase_intent": 412, "sponsorship_skepticism": 71,
      "deference": 388, "expertise_challenge": 44, "total": 915, "trust_ratio": 0.874},
+    {"channel": "Pull & Purge", "purchase_intent": 188, "sponsorship_skepticism": 122,
+     "deference": 84, "expertise_challenge": 31, "total": 425, "trust_ratio": 0.640},
     {"channel": "Roast Theory", "purchase_intent": 96, "sponsorship_skepticism": 28,
      "deference": 141, "expertise_challenge": 63, "total": 328, "trust_ratio": 0.723},
     {"channel": "Small Kitchen Coffee", "purchase_intent": 154, "sponsorship_skepticism": 19,
      "deference": 96, "expertise_challenge": 12, "total": 281, "trust_ratio": 0.890},
-    {"channel": "Pull & Purge", "purchase_intent": 188, "sponsorship_skepticism": 122,
-     "deference": 84, "expertise_challenge": 31, "total": 425, "trust_ratio": 0.640},
 ]
 
 _VOCABULARY = [
@@ -339,19 +339,19 @@ _VOCABULARY = [
 
 _RISING = [
     {"kind": "question", "title": "Lever machines for beginners", "recent": 62, "total": 74,
-     "lift": 3.41, "channel_spread": 3,
+     "lift": 3.41, "window_days": 90, "channel_spread": 3,
      "description": "Beginner-framed lever questions barely existed before March and "
                     "are now the fastest-accelerating question cluster in the corpus.",
      "examples": [_example("is a lever actually harder or does it just look harder",
                            "@springload", 640, "Roast Theory", "The Physics Of Espresso")]},
     {"kind": "complaint", "title": "Grinder prices after the tariff change", "recent": 88,
-     "total": 103, "lift": 2.87, "channel_spread": 4,
+     "total": 103, "lift": 2.87, "window_days": 90, "channel_spread": 4,
      "description": "Price complaints tied to a specific import change, concentrated "
                     "almost entirely in the last two months.",
      "examples": [_example("this grinder went up 40% since your video, worth revisiting",
                            "@pricewatch", 1120, "The Coffee Bench", "Grinder Comparison 2026")]},
     {"kind": "request", "title": "Repairability scores in reviews", "recent": 54, "total": 71,
-     "lift": 2.12, "channel_spread": 3,
+     "lift": 2.12, "window_days": 90, "channel_spread": 3,
      "description": "A new ask: viewers want a standing repairability rating in every "
                     "machine review, referencing right-to-repair coverage elsewhere.",
      "examples": [_example("add a repairability score to every review please",
@@ -552,8 +552,8 @@ def demo_video_report() -> dict:
             "items_extracted": 214,
             "distinct_statements": 96,
             "counts_by_kind": {
-                "request": 61, "question": 48, "complaint": 39,
-                "confusion": 27, "correction": 14, "praise": 25,
+                kind: sum(theme["count"] for theme in themes)
+                for kind, themes in _VIDEO_THEMES.items()
             },
         },
         "themes": _VIDEO_THEMES,

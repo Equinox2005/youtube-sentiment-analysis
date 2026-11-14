@@ -19,7 +19,7 @@ from .analysis import analyze_video
 from .config import get_anthropic_key, get_api_key, get_map_model, get_reduce_model, use_batch_api
 from .demo import demo_study, demo_video_report
 from .extraction import ExtractionError
-from .niche import run_study
+from .niche import gap_rows, run_study
 from .youtube import YouTubeError, estimate_quota
 
 app = FastAPI(title="YouTube Audience Research", version=__version__)
@@ -33,10 +33,9 @@ _reports_lock = threading.Lock()
 _CACHE_LIMIT = 20
 
 
-def _store(report: dict, kind: str) -> str:
+def _store(report: dict) -> str:
     report_id = report.get("video", {}).get("video_id") or uuid.uuid4().hex[:12]
     report["_id"] = report_id
-    report["_kind"] = kind
     with _reports_lock:
         _reports[report_id] = report
         while len(_reports) > _CACHE_LIMIT:
@@ -76,6 +75,8 @@ def _stream(work) -> StreamingResponse:
     def run() -> None:
         try:
             events.put({"type": "done", "report": work(progress)})
+        except HTTPException as exc:
+            events.put({"type": "error", "detail": exc.detail})
         except (YouTubeError, ExtractionError) as exc:
             events.put({"type": "error", "detail": str(exc)})
         except Exception as exc:  # pragma: no cover - unexpected failure
@@ -129,7 +130,7 @@ def study(
     """Run a niche study synchronously. Expect minutes, not seconds."""
     if channels.strip().lower() == "demo":
         report = demo_study()
-        _store(report, "study")
+        _store(report)
         return report
 
     api_key = _require_youtube_key()
@@ -145,7 +146,7 @@ def study(
     except (YouTubeError, ExtractionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _store(report, "study")
+    _store(report)
     return report
 
 
@@ -161,25 +162,24 @@ def study_stream(
     if channels.strip().lower() == "demo":
         def demo_work(_progress):
             report = demo_study()
-            _store(report, "study")
+            _store(report)
             return report
 
         return _stream(demo_work)
 
-    api_key = _require_youtube_key()
-    refs = _split_channels(channels)
-
+    # Checked inside work() so a failure arrives as an event: the page reads this
+    # stream with EventSource, which cannot see the body of a 400.
     def work(progress):
         report = run_study(
-            api_key,
-            refs,
+            _require_youtube_key(),
+            _split_channels(channels),
             videos_per_channel=videos_per_channel,
             comments_per_video=comments_per_video,
             sort_by=sort_by,
             label=label,
             progress=progress,
         )
-        _store(report, "study")
+        _store(report)
         return report
 
     return _stream(work)
@@ -191,10 +191,10 @@ def analyze(
     max_comments: int = Query(500, ge=10, le=5000),
     sort_by: str = Query("relevance", pattern="^(relevance|time)$"),
 ) -> dict:
-    """Comment intelligence for a single video."""
+    """Report on one video's comments."""
     if url.strip().lower() == "demo":
         report = demo_video_report()
-        _store(report, "video")
+        _store(report)
         return report
 
     api_key = _require_youtube_key()
@@ -203,7 +203,7 @@ def analyze(
     except (YouTubeError, ExtractionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _store(report, "video")
+    _store(report)
     return report
 
 
@@ -217,18 +217,17 @@ def analyze_stream(
     if url.strip().lower() == "demo":
         def demo_work(_progress):
             report = demo_video_report()
-            _store(report, "video")
+            _store(report)
             return report
 
         return _stream(demo_work)
 
-    api_key = _require_youtube_key()
-
     def work(progress):
         report = analyze_video(
-            api_key, url, max_comments=max_comments, sort_by=sort_by, progress=progress
+            _require_youtube_key(), url, max_comments=max_comments, sort_by=sort_by,
+            progress=progress,
         )
-        _store(report, "video")
+        _store(report)
         return report
 
     return _stream(work)
@@ -257,20 +256,7 @@ def _csv_response(rows: list[dict], fields: list[str], filename: str) -> Respons
 @app.get("/api/export/{report_id}/gaps.csv")
 def export_gaps(report_id: str) -> Response:
     report = _get_report(report_id)
-    rows = [
-        {
-            "title": gap["title"],
-            "kind": gap["kind"],
-            "comments": gap["count"],
-            "likes": gap["likes"],
-            "channel_spread": gap["channel_spread"],
-            "coverage": gap["coverage"],
-            "gap_score": gap["gap_score"],
-            "closest_video": (gap["closest_video"] or {}).get("title", ""),
-            "description": gap["description"],
-        }
-        for gap in report.get("content_gaps", [])
-    ]
+    rows = gap_rows(report.get("content_gaps", []))
     if not rows:
         raise HTTPException(status_code=404, detail="This report has no content gaps.")
     return _csv_response(

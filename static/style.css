@@ -10,7 +10,7 @@
   --field: #ffffff;
   --text: #111111;
   --text-2: #55554f;
-  --muted: #86857f;
+  --muted: #74736d;
   --rule: #e7e6e1;
   --border: #d9d8d2;
   --baseline: #c3c2b7;
@@ -130,9 +130,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
   text-decoration: none; display: inline-block;
 }
 .btn:hover { border-color: var(--baseline); }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-.btn-primary:hover { border-color: var(--accent); filter: brightness(1.08); }
-.btn-primary:disabled { opacity: .55; cursor: progress; }
+.btn-primary { background: #2671cf; border-color: #2671cf; color: #fff; font-weight: 600; }
+.btn-primary:hover { border-color: #2671cf; filter: brightness(1.08); }
+.btn:disabled { opacity: .55; cursor: progress; }
 .btn-icon { padding: 4px 10px; font-size: 16px; line-height: 1.2; }
 
 .progress { margin-top: 20px; }
@@ -147,7 +147,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
 
 /* ---------- report ---------- */
 
-.report { margin-top: 48px; }
+.report { margin-top: 48px; overflow-wrap: anywhere; }
 
 .report-head h1 { font-size: 28px; line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; }
 .report-meta { color: var(--text-2); margin-top: 8px; }
@@ -211,7 +211,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 
-table.data { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.data { width: 100%; border-collapse: collapse; font-size: 14px; overflow-wrap: normal; }
 table.data th, table.data td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
 table.data th { font-size: 13px; font-weight: 500; color: var(--text-2); }
 table.data .num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; padding-left: 12px; white-space: nowrap; }
@@ -221,7 +221,7 @@ table.data .sub { display: block; font-size: 13px; color: var(--muted); margin-t
 .overlap-figure { margin-bottom: 24px; text-align: center; }
 .overlap-graph { max-width: 460px; margin: 0 auto 8px; }
 
-.smalls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px 32px; }
+.smalls { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 24px 32px; }
 .small { display: flex; flex-direction: column; }
 .small h3 { font-size: 14px; line-height: 1.35; }
 .small .muted { font-size: 13px; margin-bottom: 8px; }
@@ -262,11 +262,8 @@ svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   .bar-head .bar-label { grid-column: auto; }
   .bar-head > div:nth-child(2) { display: none; }
   .gap { grid-template-columns: 24px 1fr; }
-}
-
-/* Channel names beside the circle don't fit a phone screen; the table below
-   the graph has the same numbers. */
-@media (max-width: 480px) {
+  /* Channel names beside the circle don't fit a phone screen; the table below
+     the graph has the same numbers. */
   .overlap-figure { display: none; }
 }
 
